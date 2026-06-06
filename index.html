@@ -654,7 +654,7 @@ function debounceSearch(val){
   _searchTimer=setTimeout(()=>{
     lSearch=val;
     pLanc();
-    const inp=document.querySelector('#content input[placeholder="🔍 Buscar..."]');
+    const inp=document.getElementById('lanc-search');
     if(inp){inp.value=val;inp.focus();inp.setSelectionRange(val.length,val.length);}
   },300);
 }
@@ -1039,7 +1039,7 @@ function pLanc(){
     </div>
     <div class="card-body" style="padding:12px 16px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input type="text" placeholder="🔍 Buscar..." style="width:160px" value="${esc(lSearch)}" oninput="debounceSearch(this.value)">
+        <input id="lanc-search" type="text" placeholder="🔍 Buscar..." style="width:160px" value="${esc(lSearch)}" oninput="debounceSearch(this.value)">
         <div style="display:flex;align-items:center;gap:4px">
           <label style="font-size:11px;white-space:nowrap">De:</label>
           <input type="date" value="${lDtIni}" onchange="lDtIni=this.value;lFiltMes='';pLanc()" style="width:145px">
