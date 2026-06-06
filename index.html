@@ -1769,6 +1769,7 @@ let relIni=new Date().toISOString().slice(0,7)+'-01', relFim=new Date(new Date()
 let relTab='resumo'; // 'resumo' | 'fluxo'
 let relAporteMin=0; // limite mínimo para alertar aporte
 let relContaFiltro=''; // conta filtrada no saldo diário
+let relFluxoContaFiltro=''; // conta filtrada no fluxo de caixa futuro
 
 function dailyForecast(ini,fim,contaFiltro=''){
   ensureFixedLaunchesBetween(ini,fim);
@@ -1789,18 +1790,19 @@ function dailyForecast(ini,fim,contaFiltro=''){
 }
 
 // Previsão de fluxo de caixa FUTURO (a partir de hoje ou data personalizada)
-function futureCashFlow(ini, fim){
+function futureCashFlow(ini, fim, contaFiltro=''){
   ensureFixedLaunchesBetween(ini, fim);
   const hoje = new Date().toISOString().slice(0,10);
   const days = [];
   let d = new Date(ini+'T12:00'), end = new Date(fim+'T12:00');
-  const contas = db.contas.filter(c=>c.ativo && c.tipo !== 'Investimento');
+  const contas = db.contas.filter(c=>c.ativo && c.tipo !== 'Investimento' && (!contaFiltro||c.nome===contaFiltro));
   let saldos = {};
   const diaAnterior = addDays(ini,-1);
   contas.forEach(c=>saldos[c.nome]=saldoConta(c.nome,diaAnterior,true));
   let saldoAcum = Object.values(saldos).reduce((s,v)=>s+v,0);
 
-  // Também inclui faturas de cartão com vencimento no período
+  // Inclui faturas de cartão com vencimento no período que ainda NÃO foram pagas
+  // e que não possuem provisao_fatura já lançada (evita dupla contagem)
   const faturasCartao = [];
   db.cartoes.filter(c=>c.ativo).forEach(c=>{
     let d2=new Date(ini+'T12:00');
@@ -1812,9 +1814,15 @@ function futureCashFlow(ini, fim){
         const diaFech=c.fechamento;
         let fechAnterior=new Date(y,m,diaFech,12);
         if(diaFech>=c.vencimento) fechAnterior=new Date(y,m-1,diaFech,12);
+        const mesFatura=`${fechAnterior.getFullYear()}-${String(fechAnterior.getMonth()+1).padStart(2,'0')}`;
+        // Pula se a fatura já foi paga
+        const jaFoiPaga=db.faturas_pagas.some(x=>x.cartao_id===c.id&&x.mes===mesFatura);
+        if(jaFoiPaga){d2.setMonth(d2.getMonth()+1);continue;}
+        // Pula se já existe provisao_fatura lançada (evita dupla contagem)
+        const temProvisao=db.lancamentos.some(l=>l.origem==='provisao_fatura'&&l.cartao_id===c.id&&l.fatura_mes===mesFatura);
+        if(temProvisao){d2.setMonth(d2.getMonth()+1);continue;}
         const fechStr=fechAnterior.toISOString().slice(0,10);
-        const fechAnt2=addDays(fechStr,-30);
-        const gastos=db.lancamentos.filter(l=>l.conta===c.nome&&l.tipo==='D'&&l.data>fechAnt2&&l.data<=fechStr).reduce((s,l)=>s+l.valor,0);
+        const gastos=getFaturaTransacoes(c.id,mesFatura).reduce((s,l)=>s+l.valor,0);
         if(gastos>0) faturasCartao.push({data:dataVenc,cartao:c.nome,valor:gastos,cor:c.cor});
       }
       d2.setMonth(d2.getMonth()+1);
@@ -1823,7 +1831,7 @@ function futureCashFlow(ini, fim){
 
   while(d<=end){
     const ds=d.toISOString().slice(0,10);
-    const movs=db.lancamentos.filter(l=>l.data===ds&&isContaBancaria(l.conta));
+    const movs=db.lancamentos.filter(l=>l.data===ds&&isContaBancaria(l.conta)&&(!contaFiltro||l.conta===contaFiltro));
     const faturas=faturasCartao.filter(f=>f.data===ds);
     const faturaTotal=faturas.reduce((s,f)=>s+f.valor,0);
     movs.forEach(l=>{saldos[l.conta]=(saldos[l.conta]||0)+signedValue(l)});
@@ -1902,8 +1910,10 @@ function pRel(){
   } else {
     // ── ABA FLUXO DE CAIXA FUTURO ──
     const hoje=new Date().toISOString().slice(0,10);
-    const fc=futureCashFlow(ini,fim);
+    const contasFluxo=db.contas.filter(c=>c.ativo&&c.tipo!=='Investimento').sort(cmpName);
+    const fc=futureCashFlow(ini,fim,relFluxoContaFiltro);
     const saldoHoje=fc.find(d=>d.data===hoje)?.saldoAcum ?? (fc.length?fc[0].saldoAcum:0);
+    const saldoAtualFluxo=relFluxoContaFiltro?saldoConta(relFluxoContaFiltro):contasFluxo.reduce((s,c)=>s+saldoConta(c.nome),0);
     const diasAlerta=fc.filter(d=>d.isFuture&&d.saldoAcum<relAporteMin);
     const minFuturo=Math.min(...fc.filter(d=>d.isFuture).map(d=>d.saldoAcum),Infinity);
     const aporteNecessario=minFuturo<relAporteMin?(relAporteMin-minFuturo):0;
@@ -1956,6 +1966,19 @@ function pRel(){
       <div class="kpi ${minFuturo>=0?'c-g':'c-r'}"><div class="kpi-lbl">Menor saldo futuro</div><div class="kpi-val">${minFuturo===Infinity?R(0):R(minFuturo)}</div><div class="kpi-sub">${minFuturo<0?'⚠ Saldo negativo previsto':''}</div></div>
       <div class="kpi c-a"><div class="kpi-lbl">Aporte necessário</div><div class="kpi-val">${R(aporteNecessario)}</div><div class="kpi-sub">${aporteNecessario>0?'Para manter saldo mínimo':' Não necessário'}</div></div>
       <div class="kpi c-r"><div class="kpi-lbl">Dias c/ alerta</div><div class="kpi-val">${diasAlerta.length}</div><div class="kpi-sub">abaixo do mínimo definido</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <h3>Filtrar por Conta</h3>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--ink3)">Conta:</span>
+          <select onchange="relFluxoContaFiltro=this.value;pRel()" style="font-size:12px;padding:4px 8px;border:1.5px solid var(--line);border-radius:var(--r)">
+            <option value="">Todas as contas</option>
+            ${contasFluxo.map(c=>`<option value="${esc(c.nome)}" ${relFluxoContaFiltro===c.nome?'selected':''}>${esc(c.nome)}</option>`).join('')}
+          </select>
+          ${relFluxoContaFiltro?`<span style="font-size:12px;color:var(--ink3)">Saldo atual: <strong class="${saldoAtualFluxo>=0?'v-pos':'v-neg'}">${R(saldoAtualFluxo)}</strong></span>`:''}
+        </div>
+      </div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-head">
@@ -2167,7 +2190,7 @@ async function bootApp(){
       const photoURL = fbUser.photoURL;
       currentUser = {id:fbUser.uid, nome:displayName, login:fbUser.email, admin:true, photo:photoURL};
       const avatarHtml = photoURL
-        ? `<img src="${photoURL}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0">`
+        ? `<img src="${esc(photoURL)}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0">`
         : '👤';
       document.getElementById('tb-user').innerHTML=`<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink3)">${avatarHtml} ${esc(displayName)}</span>`;
 
