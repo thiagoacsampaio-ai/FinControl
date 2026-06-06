@@ -367,6 +367,7 @@ let _saveTimeout = null;
 let _unsubscribe = null; // listener Firestore
 let _lastLancParams = null; // preserva params para "Salvar e Novo"
 let _hideVals = false; // modo privacidade
+let painelSaudeContaFiltro = ''; // filtro de conta no card Saúde Financeira
 
 const ICONES_PRESET = ['💼','💻','🏢','📈','🎯','➕','🍽','🏠','🚗','❤️','📚','🎬','📱','👕','📡','🛡','🏛','🏷','➖','🛒','⚡','💧','🔥','🐾','✈️','🎁','💊','🏦','💳','💰','📦','🧾','🔁','📌','🎵','🎮','🐶','🌱','☕','🍕','🍺','🏋','🚴','🎓','🔧','🏪','🚌','🚂','⛽','🛍','🎪','🧴','🛁','🪴','🖥','⌨','🖨','📷','🎸','🎹','🧩','🃏','♟','⚽','🏀','🎾','🏊','🧘','🍜','🥗','🍷','🧃','🚿','🪥','💈','🧹','🪣'];
 const TIPOS_CONTA=['Corrente','Poupança','Investimento','Carteira','Digital','Outros'];
@@ -769,13 +770,16 @@ function getProxVencimentos(dias=15){
   });
   return items.sort((a,b)=>a.data<b.data?-1:1);
 }
-function calcSaude(){
+function calcSaude(contaFiltro=''){
   const ms3=[-2,-1,0].map(i=>{const d=new Date();d.setDate(1);d.setMonth(d.getMonth()+i);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`});
-  const recMedia=ms3.reduce((s,m)=>s+db.lancamentos.filter(l=>l.data?.startsWith(m)&&l.tipo==='R'&&l.pago!==false).reduce((a,l)=>a+l.valor,0),0)/3;
-  const depMedia=ms3.reduce((s,m)=>s+db.lancamentos.filter(l=>l.data?.startsWith(m)&&(l.tipo==='D'||l.origem==='provisao_fatura')&&l.pago!==false&&!isCartaoPurchase(l)).reduce((a,l)=>a+l.valor,0),0)/3;
-  const saldoLiq=db.contas.filter(c=>c.ativo&&c.tipo!=='Investimento').reduce((s,c)=>s+saldoConta(c.nome),0);
-  const saldoInv=db.contas.filter(c=>c.ativo&&c.tipo==='Investimento').reduce((s,c)=>s+saldoConta(c.nome),0);
-  const parcelaMes=db.parcelados.reduce((s,p)=>{const r=p.np-p.pg;return r>0?s+(p.total/p.np):s},0);
+  const lancFiltro=l=>!contaFiltro||(l.conta===contaFiltro);
+  const recMedia=ms3.reduce((s,m)=>s+db.lancamentos.filter(l=>l.data?.startsWith(m)&&l.tipo==='R'&&l.pago!==false&&lancFiltro(l)).reduce((a,l)=>a+l.valor,0),0)/3;
+  const depMedia=ms3.reduce((s,m)=>s+db.lancamentos.filter(l=>l.data?.startsWith(m)&&(l.tipo==='D'||l.origem==='provisao_fatura')&&l.pago!==false&&!isCartaoPurchase(l)&&lancFiltro(l)).reduce((a,l)=>a+l.valor,0),0)/3;
+  const contasLiq=db.contas.filter(c=>c.ativo&&c.tipo!=='Investimento'&&(!contaFiltro||c.nome===contaFiltro));
+  const contasInv=db.contas.filter(c=>c.ativo&&c.tipo==='Investimento'&&(!contaFiltro||c.nome===contaFiltro));
+  const saldoLiq=contasLiq.reduce((s,c)=>s+saldoConta(c.nome),0);
+  const saldoInv=contasInv.reduce((s,c)=>s+saldoConta(c.nome),0);
+  const parcelaMes=contaFiltro?0:db.parcelados.reduce((s,p)=>{const r=p.np-p.pg;return r>0?s+(p.total/p.np):s},0);
   const scLiq=Math.min(100,depMedia>0?(saldoLiq/(depMedia*3))*100:100);
   const scPoup=saldoInv+saldoLiq>0?Math.min(100,(saldoInv/(saldoInv+saldoLiq))*500):0;
   const scEndiv=recMedia>0?Math.max(0,100-(parcelaMes/recMedia/0.3)*100):100;
@@ -864,7 +868,7 @@ function pPainel(){
   const despM=mesL.filter(l=>(l.tipo==='D'||l.origem==='provisao_fatura')&&l.pago!==false).reduce((s,l)=>s+l.valor,0);
   const pend=mesL.filter(l=>l.pago===false&&l.tipo!=='R').reduce((s,l)=>s+l.valor,0);
 
-  const saude=calcSaude();
+  const saude=calcSaude(painelSaudeContaFiltro);
   const aporteInfo=getAporteInfo();
   const proxVenc=getProxVencimentos(15);
   const catStats=getCatPaiStats(mesL);
@@ -897,8 +901,13 @@ function pPainel(){
 
   <div class="three" style="margin-bottom:16px">
     <div class="card">
-      <div class="card-head">
+      <div class="card-head" style="flex-wrap:wrap;gap:6px">
         <h3>💚 Saúde Financeira</h3>
+        <div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end">
+          <select onchange="painelSaudeContaFiltro=this.value;pPainel()" style="font-size:11px;padding:3px 6px;border:1.5px solid var(--line);border-radius:var(--r);max-width:140px">
+            <option value="">Todas as contas</option>
+            ${db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<option value="${esc(c.nome)}" ${painelSaudeContaFiltro===c.nome?'selected':''}>${esc(c.nome)}</option>`).join('')}
+          </select>
         <div class="hint-wrap" style="position:relative">
           <button class="ico-btn hint-btn" style="font-size:12px;width:22px;height:22px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center" onclick="this.nextElementSibling.classList.toggle('hidden')">ℹ</button>
           <div class="hidden" style="position:absolute;right:0;top:28px;width:280px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-md);padding:14px;z-index:200;font-size:11px;line-height:1.6">
@@ -912,6 +921,7 @@ function pPainel(){
             <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line);color:var(--ink3)">Médias calculadas sobre os últimos 3 meses.</div>
           </div>
         </div>
+        </div><!-- fecha flex alinhamento filtro+hint -->
       </div>
       <div class="card-body" style="text-align:center">
         ${scoreGauge}
