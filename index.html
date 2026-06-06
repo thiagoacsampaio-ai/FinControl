@@ -648,6 +648,8 @@ function rebuildParcelStatusFromLaunch(p){const ls=db.lancamentos.filter(l=>l.or
 // ── NAVIGATION ──────────────────────────────────────────────────────
 const PAGES = {painel:'Painel',lancamentos:'Lançamentos',importar:'Importar Extrato',parcelados:'Parcelados',fixos:'Despesas Fixas',contas:'Contas',cartoes:'Cartões',faturas:'Faturas',categorias:'Categorias',relatorio:'Relatório',usuarios:'Usuários'};
 let page='painel';
+let _searchTimer=null;
+function debounceSearch(val){clearTimeout(_searchTimer);_searchTimer=setTimeout(()=>{lSearch=val;pLanc();},300);}
 function go(p){page=p;document.getElementById('sidebar').classList.remove('mob-open');document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('on',el.getAttribute('onclick')&&el.getAttribute('onclick').includes("'"+p+"'")));document.getElementById('tb-title').textContent=PAGES[p]||p;({painel:pPainel,lancamentos:pLanc,importar:pImport,parcelados:pParc,fixos:pFixos,contas:pContas,cartoes:pCartoes,faturas:pFaturas,categorias:pCats,relatorio:pRel,usuarios:pUsuarios}[p]||pPainel)()}
 
 // ── SORTABLE TABLE ───────────────────────────────────────────────────
@@ -1029,7 +1031,7 @@ function pLanc(){
     </div>
     <div class="card-body" style="padding:12px 16px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input type="text" placeholder="🔍 Buscar..." style="width:160px" value="${esc(lSearch)}" oninput="lSearch=this.value;pLanc()">
+        <input type="text" placeholder="🔍 Buscar..." style="width:160px" value="${esc(lSearch)}" oninput="debounceSearch(this.value)">
         <div style="display:flex;align-items:center;gap:4px">
           <label style="font-size:11px;white-space:nowrap">De:</label>
           <input type="date" value="${lDtIni}" onchange="lDtIni=this.value;lFiltMes='';pLanc()" style="width:145px">
