@@ -1,0 +1,24 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Lista de e-mails autorizados
+    // Adicione novos usuários aqui E em ALLOWED_EMAILS no index.html
+    function isAllowed() {
+      return request.auth != null &&
+             request.auth.token.email in [
+               'thiagoacsampaio@gmail.com'
+             ];
+    }
+
+    // Documento compartilhado principal — só usuários autorizados
+    match /shared/fincontrol {
+      allow read, write: if isAllowed();
+    }
+
+    // Bloquear todo o resto por padrão
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
