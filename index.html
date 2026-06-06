@@ -651,12 +651,99 @@ let page='painel';
 let _searchTimer=null;
 function debounceSearch(val){
   clearTimeout(_searchTimer);
-  _searchTimer=setTimeout(()=>{
-    lSearch=val;
-    pLanc();
-    const inp=document.getElementById('lanc-search');
-    if(inp){inp.value=val;inp.focus();inp.setSelectionRange(val.length,val.length);}
-  },300);
+  lSearch=val; // atualiza imediatamente para filtro em memória
+  _searchTimer=setTimeout(()=>refreshLancResults(),300);
+}
+
+function refreshLancResults(){
+  const resultsEl=document.getElementById('lanc-results');
+  if(!resultsEl){pLanc();return;} // fallback se o elemento não existir
+  const hoje=new Date().toISOString().slice(0,10);
+  const ini=lDtIni||(lFiltMes?lFiltMes+'-01':`${hoje.slice(0,7)}-01`);
+  const fim=lDtFim||(lFiltMes?(lFiltMes+'-'+String(monthEnd(lFiltMes)).padStart(2,'0')):hoje);
+  ensureFixedLaunchesBetween(ini,fim);
+  ensureProvisoesFaturas(ini,fim);
+  let list=[...db.lancamentos].filter(l=>!isCartaoPurchase(l)&&l.origem!=='pagamento_fatura');
+  if(lFiltTipo)list=list.filter(l=>l.tipo===lFiltTipo);
+  if(lFiltMes)list=list.filter(l=>l.data&&l.data.startsWith(lFiltMes));
+  if(lDtIni)list=list.filter(l=>l.data>=lDtIni);
+  if(lDtFim)list=list.filter(l=>l.data<=lDtFim);
+  if(lFiltConta)list=list.filter(l=>l.conta===lFiltConta);
+  if(lFiltCat)list=list.filter(l=>l.cat_id==lFiltCat);
+  if(lPago)list=list.filter(l=>lPago==='pago'?l.pago!==false:l.pago===false);
+  if(lSearch)list=list.filter(l=>String(l.desc).toLowerCase().includes(lSearch.toLowerCase()));
+  list.sort((a,b)=>a.data<b.data?1:a.data>b.data?-1:0);
+  const fatSin=(!lFiltTipo||lFiltTipo==='D')?getFaturasSinteticas(ini,fim).filter(f=>{
+    if(lSearch&&!f.cartaoNome.toLowerCase().includes(lSearch.toLowerCase()))return false;
+    if(lPago==='pago'&&!f.fp)return false;
+    if(lPago==='pendente'&&f.fp)return false;
+    if(lFiltConta&&f.cartaoNome!==lFiltConta)return false;
+    return true;
+  }):[];
+  const rec=list.filter(l=>l.tipo==='R').reduce((s,l)=>s+l.valor,0);
+  const dep=list.filter(l=>l.tipo==='D').reduce((s,l)=>s+l.valor,0)+fatSin.reduce((s,f)=>s+f.total,0);
+  const inv=list.filter(l=>l.tipo==='I').reduce((s,l)=>s+l.valor,0);
+  const pend=list.filter(l=>l.pago===false).reduce((s,l)=>s+l.valor,0)+fatSin.filter(f=>!f.fp).reduce((s,f)=>s+f.total,0);
+  const rows=list.map(l=>{
+    const cat=catById(l.cat_id);
+    const saldoDia=isContaBancaria(l.conta)?R(saldoContaDia(l.conta,l.data)):'—';
+    const parcInfo=l.parcela_num?`<br><span class="txt-xs" style="color:var(--purple)">Parcela ${l.parcela_num}/${l.parcela_total}</span>`:'';
+    return{sort:[l.data,l.desc,catFullName(cat),l.conta,l.tipo,l.valor,l.pago!==false?1:0,saldoDia,l.origem||'manual',''],cells:[
+      `<td class="mono txt-xs">${fdt(l.data)}</td>`,
+      `<td>${esc(l.desc)}${parcInfo}</td>`,
+      `<td>${esc(catLabel(cat))}</td>`,
+      `<td>${esc(l.conta)}</td>`,
+      `<td>${tipoTag(l.tipo)}</td>`,
+      `<td class="${vClass(l.tipo,l.transfer_out)}">${vSign(l.tipo,l.transfer_out)}${R(l.valor)}</td>`,
+      `<td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Pago':'Pendente'}</button></td>`,
+      `<td class="mono txt-xs">${saldoDia}</td>`,
+      `<td>${origemTag(l)}</td>`,
+      `<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>`
+    ]};
+  });
+  const fatRows=fatSin.map(f=>{
+    const pago=!!f.fp;
+    const hoje2=new Date().toISOString().slice(0,10);
+    const diasVenc=Math.ceil((new Date(f.vencimento)-new Date(hoje2))/(1000*60*60*24));
+    const urgente=!pago&&diasVenc>=0&&diasVenc<=5;
+    const vencida=!pago&&diasVenc<0;
+    const statusTag=pago?`<span class="tag tag-g">✓ Pago</span>`:urgente?`<span class="tag tag-a">⚡ Vence em ${diasVenc}d</span>`:vencida?`<span class="tag tag-r">⚠ Vencida</span>`:`<span class="tag tag-x">Pendente</span>`;
+    const acoes=pago?`<button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver fatura</button>`:`<div style="display:flex;gap:3px"><button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver</button><button class="btn btn-xs btn-dark" onclick="openPagarFaturaModal(${f.cartaoId},'${f.mes}',${f.total})">Pagar</button></div>`;
+    return{sort:[f.vencimento,`Fatura ${f.cartaoNome}`,'Cartão',f.cartaoNome,'D',f.total,pago?1:0,'—','fatura',''],cells:[
+      `<td class="mono txt-xs">${fdt(f.vencimento)}</td>`,
+      `<td><span style="display:inline-flex;align-items:center;gap:6px"><span class="dot" style="background:${f.cor}"></span><strong>Fatura ${esc(f.cartaoNome)}</strong></span><br><span class="txt-xs" style="color:var(--ink3)">${f.transacoes.length} compra(s) · fecha ${fdt(f.fechamento)}</span></td>`,
+      `<td><span class="tag tag-r" style="font-size:10px">💳 Cartão</span></td>`,
+      `<td>${esc(f.cartaoNome)}</td>`,
+      `<td><span class="tag tag-r">Despesa</span></td>`,
+      `<td class="v-neg">-${R(f.total)}</td>`,
+      `<td>${statusTag}</td>`,
+      `<td class="mono txt-xs">—</td>`,
+      `<td><span class="tag tag-p txt-xs">fatura</span></td>`,
+      `<td>${acoes}</td>`
+    ]};
+  });
+  const allRows=[...rows,...fatRows];
+  resultsEl.innerHTML=`
+    <div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
+      <div class="kpi c-g"><div class="kpi-lbl">Receitas</div><div class="kpi-val">${R(rec)}</div></div>
+      <div class="kpi c-r"><div class="kpi-lbl">Despesas</div><div class="kpi-val">${R(dep)}</div></div>
+      <div class="kpi c-b"><div class="kpi-lbl">Investimentos</div><div class="kpi-val">${R(inv)}</div></div>
+      <div class="kpi ${(rec-dep)>=0?'c-g':'c-r'}"><div class="kpi-lbl">Saldo Filtrado</div><div class="kpi-val">${R(rec-dep)}</div></div>
+      <div class="kpi c-a"><div class="kpi-lbl">A pagar</div><div class="kpi-val">${R(pend)}</div></div>
+    </div>
+    <div class="tip tip-blue" style="margin-bottom:12px">💳 Compras no cartão ficam na <strong>Gestão de Faturas</strong>. Aqui aparece apenas a fatura consolidada por cartão.</div>
+    <div class="card">
+      <div class="card-head">
+        <h3>Lançamentos <span class="tag tag-x" style="font-size:11px;margin-left:4px">${allRows.length}</span></h3>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="exportScreenCSV('lancamentos')">CSV</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportAllExcel()">Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="go('importar')">Importar</button>
+          <button class="btn btn-green btn-sm" onclick="openLancModal()">+ Novo</button>
+        </div>
+      </div>
+      <div class="tbl-wrap">${sortableTable('lancamentos',['Data','Descrição','Categoria','Conta','Tipo','Valor','Status','Saldo conta/dia','Origem','Ações'],allRows,'Nenhum lançamento encontrado')}</div>
+    </div>`;
 }
 function go(p){page=p;document.getElementById('sidebar').classList.remove('mob-open');document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('on',el.getAttribute('onclick')&&el.getAttribute('onclick').includes("'"+p+"'")));document.getElementById('tb-title').textContent=PAGES[p]||p;({painel:pPainel,lancamentos:pLanc,importar:pImport,parcelados:pParc,fixos:pFixos,contas:pContas,cartoes:pCartoes,faturas:pFaturas,categorias:pCats,relatorio:pRel,usuarios:pUsuarios}[p]||pPainel)()}
 
@@ -943,100 +1030,10 @@ function pLanc(){
   const hoje=new Date().toISOString().slice(0,10);
   const ini=lDtIni||(lFiltMes?lFiltMes+'-01':`${hoje.slice(0,7)}-01`);
   const fim=lDtFim||(lFiltMes?(lFiltMes+'-'+String(monthEnd(lFiltMes)).padStart(2,'0')):hoje);
-  ensureFixedLaunchesBetween(ini,fim);
-  ensureProvisoesFaturas(ini,fim);
-
-  // Exclui compras de cartão — ficam na gestão de faturas; provisao_fatura aparece como débito na conta
-  let list=[...db.lancamentos].filter(l=>!isCartaoPurchase(l)&&l.origem!=='pagamento_fatura');
-  if(lFiltTipo)list=list.filter(l=>l.tipo===lFiltTipo);
-  if(lFiltMes)list=list.filter(l=>l.data&&l.data.startsWith(lFiltMes));
-  if(lDtIni)list=list.filter(l=>l.data>=lDtIni);
-  if(lDtFim)list=list.filter(l=>l.data<=lDtFim);
-  if(lFiltConta)list=list.filter(l=>l.conta===lFiltConta);
-  if(lFiltCat)list=list.filter(l=>l.cat_id==lFiltCat);
-  if(lPago)list=list.filter(l=>lPago==='pago'?l.pago!==false:l.pago===false);
-  if(lSearch)list=list.filter(l=>String(l.desc).toLowerCase().includes(lSearch.toLowerCase()));
-  list.sort((a,b)=>a.data<b.data?1:a.data>b.data?-1:0);
-
-  // Faturas sintéticas de cartão para o período
-  const fatSin=(!lFiltTipo||lFiltTipo==='D')?getFaturasSinteticas(ini,fim).filter(f=>{
-    if(lSearch&&!f.cartaoNome.toLowerCase().includes(lSearch.toLowerCase()))return false;
-    if(lPago==='pago'&&!f.fp)return false;
-    if(lPago==='pendente'&&f.fp)return false;
-    if(lFiltConta&&f.cartaoNome!==lFiltConta)return false;
-    return true;
-  }):[];
-
   const meses=[...new Set(db.lancamentos.map(l=>l.data?l.data.slice(0,7):null).filter(Boolean))].sort().reverse();
-
-  // KPIs incluem faturas de cartão como despesa
-  const rec=list.filter(l=>l.tipo==='R').reduce((s,l)=>s+l.valor,0);
-  const dep=list.filter(l=>l.tipo==='D').reduce((s,l)=>s+l.valor,0)+fatSin.reduce((s,f)=>s+f.total,0);
-  const inv=list.filter(l=>l.tipo==='I').reduce((s,l)=>s+l.valor,0);
-  const pend=list.filter(l=>l.pago===false).reduce((s,l)=>s+l.valor,0)+fatSin.filter(f=>!f.fp).reduce((s,f)=>s+f.total,0);
-
-  // Rows de lançamentos normais
-  const rows=list.map(l=>{
-    const cat=catById(l.cat_id);
-    const saldoDia=isContaBancaria(l.conta)?R(saldoContaDia(l.conta,l.data)):'—';
-    const parcInfo=l.parcela_num?`<br><span class="txt-xs" style="color:var(--purple)">Parcela ${l.parcela_num}/${l.parcela_total}</span>`:'';
-    return{sort:[l.data,l.desc,catFullName(cat),l.conta,l.tipo,l.valor,l.pago!==false?1:0,saldoDia,l.origem||'manual',''],cells:[
-      `<td class="mono txt-xs">${fdt(l.data)}</td>`,
-      `<td>${esc(l.desc)}${parcInfo}</td>`,
-      `<td>${esc(catLabel(cat))}</td>`,
-      `<td>${esc(l.conta)}</td>`,
-      `<td>${tipoTag(l.tipo)}</td>`,
-      `<td class="${vClass(l.tipo,l.transfer_out)}">${vSign(l.tipo,l.transfer_out)}${R(l.valor)}</td>`,
-      `<td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Pago':'Pendente'}</button></td>`,
-      `<td class="mono txt-xs">${saldoDia}</td>`,
-      `<td>${origemTag(l)}</td>`,
-      `<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>`
-    ]};
-  });
-
-  // Rows sintéticas de fatura
-  const fatRows=fatSin.map(f=>{
-    const pago=!!f.fp;
-    const hoje2=new Date().toISOString().slice(0,10);
-    const diasVenc=Math.ceil((new Date(f.vencimento)-new Date(hoje2))/(1000*60*60*24));
-    const urgente=!pago&&diasVenc>=0&&diasVenc<=5;
-    const vencida=!pago&&diasVenc<0;
-    const statusTag=pago
-      ?`<span class="tag tag-g">✓ Pago</span>`
-      :urgente?`<span class="tag tag-a">⚡ Vence em ${diasVenc}d</span>`
-      :vencida?`<span class="tag tag-r">⚠ Vencida</span>`
-      :`<span class="tag tag-x">Pendente</span>`;
-    const acoes=pago
-      ?`<button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver fatura</button>`
-      :`<div style="display:flex;gap:3px"><button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver</button><button class="btn btn-xs btn-dark" onclick="openPagarFaturaModal(${f.cartaoId},'${f.mes}',${f.total})">Pagar</button></div>`;
-    return{sort:[f.vencimento,`Fatura ${f.cartaoNome}`,'Cartão',f.cartaoNome,'D',f.total,pago?1:0,'—','fatura',''],cells:[
-      `<td class="mono txt-xs">${fdt(f.vencimento)}</td>`,
-      `<td><span style="display:inline-flex;align-items:center;gap:6px"><span class="dot" style="background:${f.cor}"></span><strong>Fatura ${esc(f.cartaoNome)}</strong></span><br><span class="txt-xs" style="color:var(--ink3)">${f.transacoes.length} compra(s) · fecha ${fdt(f.fechamento)}</span></td>`,
-      `<td><span class="tag tag-r" style="font-size:10px">💳 Cartão</span></td>`,
-      `<td>${esc(f.cartaoNome)}</td>`,
-      `<td><span class="tag tag-r">Despesa</span></td>`,
-      `<td class="v-neg">-${R(f.total)}</td>`,
-      `<td>${statusTag}</td>`,
-      `<td class="mono txt-xs">—</td>`,
-      `<td><span class="tag tag-p txt-xs">fatura</span></td>`,
-      `<td>${acoes}</td>`
-    ]};
-  });
-
-  const allRows=[...rows,...fatRows];
-
-  set(`<div class="kpi-row" style="grid-template-columns:repeat(5,1fr)"><div class="kpi c-g"><div class="kpi-lbl">Receitas</div><div class="kpi-val">${R(rec)}</div></div><div class="kpi c-r"><div class="kpi-lbl">Despesas</div><div class="kpi-val">${R(dep)}</div></div><div class="kpi c-b"><div class="kpi-lbl">Investimentos</div><div class="kpi-val">${R(inv)}</div></div><div class="kpi ${(rec-dep)>=0?'c-g':'c-r'}"><div class="kpi-lbl">Saldo Filtrado</div><div class="kpi-val">${R(rec-dep)}</div></div><div class="kpi c-a"><div class="kpi-lbl">A pagar</div><div class="kpi-val">${R(pend)}</div></div></div>
-  <div class="tip tip-blue" style="margin-bottom:12px">💳 Compras no cartão ficam na <strong>Gestão de Faturas</strong>. Aqui aparece apenas a fatura consolidada por cartão.</div>
-  <div class="card">
-    <div class="card-head">
-      <h3>Lançamentos <span class="tag tag-x" style="font-size:11px;margin-left:4px">${allRows.length}</span></h3>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-ghost btn-sm" onclick="exportScreenCSV('lancamentos')">CSV</button>
-        <button class="btn btn-ghost btn-sm" onclick="exportAllExcel()">Excel</button>
-        <button class="btn btn-ghost btn-sm" onclick="go('importar')">Importar</button>
-        <button class="btn btn-green btn-sm" onclick="openLancModal()">+ Novo</button>
-      </div>
-    </div>
+  // Renderiza apenas a barra de filtros (persistente) + container de resultados
+  // O campo de busca NÃO é recriado durante a digitação — só refreshLancResults() atualiza os dados
+  set(`<div class="card" style="margin-bottom:0;border-bottom:none;border-radius:var(--r-lg) var(--r-lg) 0 0">
     <div class="card-body" style="padding:12px 16px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input id="lanc-search" type="text" placeholder="🔍 Buscar..." style="width:160px" value="${esc(lSearch)}" oninput="debounceSearch(this.value)">
@@ -1057,8 +1054,9 @@ function pLanc(){
         <button class="btn btn-ghost btn-sm" onclick="lFiltTipo='';lFiltMes='';lFiltConta='';lFiltCat='';lSearch='';lDtIni='';lDtFim='';lPago='';pLanc()">✕ Limpar</button>
       </div>
     </div>
-    <div class="tbl-wrap">${sortableTable('lancamentos',['Data','Descrição','Categoria','Conta','Tipo','Valor','Status','Saldo conta/dia','Origem','Ações'],allRows,'Nenhum lançamento encontrado')}</div>
-  </div>`);
+  </div>
+  <div id="lanc-results"></div>`);
+  refreshLancResults();
 }
 
 function openLancModal(eid, reuseParams=false){
