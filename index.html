@@ -649,7 +649,15 @@ function rebuildParcelStatusFromLaunch(p){const ls=db.lancamentos.filter(l=>l.or
 const PAGES = {painel:'Painel',lancamentos:'Lançamentos',importar:'Importar Extrato',parcelados:'Parcelados',fixos:'Despesas Fixas',contas:'Contas',cartoes:'Cartões',faturas:'Faturas',categorias:'Categorias',relatorio:'Relatório',usuarios:'Usuários'};
 let page='painel';
 let _searchTimer=null;
-function debounceSearch(val){clearTimeout(_searchTimer);_searchTimer=setTimeout(()=>{lSearch=val;pLanc();},300);}
+function debounceSearch(val){
+  clearTimeout(_searchTimer);
+  _searchTimer=setTimeout(()=>{
+    lSearch=val;
+    pLanc();
+    const inp=document.querySelector('#content input[placeholder="🔍 Buscar..."]');
+    if(inp){inp.value=val;inp.focus();inp.setSelectionRange(val.length,val.length);}
+  },300);
+}
 function go(p){page=p;document.getElementById('sidebar').classList.remove('mob-open');document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('on',el.getAttribute('onclick')&&el.getAttribute('onclick').includes("'"+p+"'")));document.getElementById('tb-title').textContent=PAGES[p]||p;({painel:pPainel,lancamentos:pLanc,importar:pImport,parcelados:pParc,fixos:pFixos,contas:pContas,cartoes:pCartoes,faturas:pFaturas,categorias:pCats,relatorio:pRel,usuarios:pUsuarios}[p]||pPainel)()}
 
 // ── SORTABLE TABLE ───────────────────────────────────────────────────
