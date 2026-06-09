@@ -397,10 +397,8 @@ async function doLoginGoogle(){
   provider.setCustomParameters({prompt:'select_account'});
   try{
     await _fire.signInWithPopup(_fire.auth, provider);
-    // onAuthStateChanged cuida do resto
   } catch(e){
     if(e.code==='auth/popup-blocked'||e.code==='auth/operation-not-supported-in-this-environment'){
-      // Popup bloqueado — usa redirect
       try{ await _fire.signInWithRedirect(_fire.auth, provider); }
       catch(e2){ err.textContent='Erro ao entrar: '+e2.message; err.style.display='block'; btn.innerHTML=_GOOGLE_SVG+' Entrar com Google'; btn.disabled=false; }
     } else if(e.code!=='auth/popup-closed-by-user'&&e.code!=='auth/cancelled-popup-request'){
@@ -570,23 +568,23 @@ function ensureFixedLaunchesForMonth(mk){
       const startMk=(f.data_inicio||mk+'-01').slice(0,7);
       if(mk<startMk)return;
       getSubMonthlyDates(f,mk).forEach(data=>{
-        if(f.tipo==='Tr'){
-          let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===true);
-          let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===false);
-          if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
-          else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
-          if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
-          else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
-        } else {
-          let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data);
-          if(!l){
+        let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data);
+        if(!l){
+          if(f.tipo==='Tr'){
+            let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===true);
+            let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===false);
+            if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
+            else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
+            if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
+            else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
+          } else {
             db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id});
             changed=true;
-          } else {
-            let ch2=false;
-            if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
-            if(ch2)changed=true;
           }
+        } else {
+          let ch2=false;
+          if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
+          if(ch2)changed=true;
         }
       });
     } else {
@@ -600,24 +598,23 @@ function ensureFixedLaunchesForMonth(mk){
       if(interval>1&&diff%interval!==0)return;
       const day=String(Math.min(Number(f.dia||1),monthEnd(mk))).padStart(2,'0');
       const data=`${mk}-${day}`;
-      if(f.tipo==='Tr'){
-        let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===true);
-        let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===false);
-        if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
-        else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
-        if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
-        else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
-      } else {
-        let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk);
-        if(!l){
+      let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk);
+      if(!l){
+        if(f.tipo==='Tr'){
+          let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===true);
+          let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===false);
+          if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
+          else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
+          if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
+          else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
+        } else {
           db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id});
           changed=true;
-        } else {
-          // Só atualiza desc/conta/cat se não foi editado manualmente; nunca sobrescreve valor e data manuais
-          let ch2=false;
-          if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
-          if(ch2)changed=true;
         }
+      } else {
+        let ch2=false;
+        if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
+        if(ch2)changed=true;
       }
     }
   });
@@ -1485,7 +1482,6 @@ function saveFixo(eid,andNew){
   const di=fv('x-di')||new Date().toISOString().slice(0,10);
   if(!ds||!vl||!di){alert('Preencha os campos obrigatórios.');return}
   if(tp==='Tr'&&!cd){alert('Selecione a Conta Destino para Transferência.');return}
-  // Para freq mensais+, dia do mês vem da data de início
   const da=fq==='diario'?1:parseInt(di.slice(8,10))||1;
   if(eid){
     const i=db.fixos.findIndex(f=>f.id===eid);
@@ -2230,7 +2226,6 @@ async function bootApp(){
   // Captura retorno de signInWithRedirect (caso popup tenha sido bloqueado)
   try{
     const result = await _fire.getRedirectResult(_fire.auth);
-    // Se result.user existir, onAuthStateChanged cuida do resto
   }catch(e){
     if(e.code&&e.code!=='auth/no-current-user'){
       const err=document.getElementById('login-err');
@@ -2333,3 +2328,8 @@ function migrateDB_quiet(){
   db.lancamentos.forEach(l=>{if(l.origem==='pagamento_fatura')l.origem='provisao_fatura';});
   sanitizeDB(); // limpa órfãos
 }
+
+bootApp();
+</script>
+</body>
+</html>
