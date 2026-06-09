@@ -520,7 +520,7 @@ function migrateDB(){db.faturas_pagas=db.faturas_pagas||[];db.cartoes=db.cartoes
   db.categorias.forEach(c=>{if(c.parent_id===undefined)c.parent_id=null;if(!c.icone)c.icone='📌';if(!c.cor)c.cor=c.tipo==='R'?'#00875a':'#c9283e'});
   db.lancamentos.forEach(l=>{if(l.pago===undefined)l.pago=true;if(!l.origem)l.origem=l.importado?'importado':'manual';l.valor=Number(l.valor||0)});
   db.parcelados.forEach(p=>{if(!p.primeira_data)p.primeira_data=p.data;if(p.pg===undefined)p.pg=0});
-  db.fixos.forEach(f=>{if(!f.meses)f.meses={};f.valor=Number(f.valor||0);if(f.repetir_meses===undefined)f.repetir_meses=0;if(!f.data_inicio)f.data_inicio=new Date().toISOString().slice(0,10);if(!f.frequencia)f.frequencia='mensal';});
+  db.fixos.forEach(f=>{if(!f.meses)f.meses={};f.valor=Number(f.valor||0);if(f.repetir_meses===undefined)f.repetir_meses=0;if(!f.data_inicio)f.data_inicio=new Date().toISOString().slice(0,10);if(!f.frequencia)f.frequencia='mensal';if(!f.tipo)f.tipo='D';});
   db.parcelados.forEach(p=>{if(!db.lancamentos.some(l=>l.origem==='parcelado'&&l.ref_id===p.id))regenerateParcelLaunches(p)});
   // Migra pagamento_fatura → provisao_fatura
   db.lancamentos.forEach(l=>{if(l.origem==='pagamento_fatura')l.origem='provisao_fatura';});
@@ -564,15 +564,23 @@ function ensureFixedLaunchesForMonth(mk){
       const startMk=(f.data_inicio||mk+'-01').slice(0,7);
       if(mk<startMk)return;
       getSubMonthlyDates(f,mk).forEach(data=>{
-        let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data);
-        if(!l){
-          db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'despesa fixa',importado:false,pago:false,origem:'fixo',ref_id:f.id});
-          changed=true;
+        if(f.tipo==='Tr'){
+          let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===true);
+          let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===false);
+          if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
+          else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
+          if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
+          else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
         } else {
-          // Mesmo comportamento do mensal: respeita edições manuais de valor/data
-          let ch2=false;
-          if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
-          if(ch2)changed=true;
+          let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data);
+          if(!l){
+            db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id});
+            changed=true;
+          } else {
+            let ch2=false;
+            if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
+            if(ch2)changed=true;
+          }
         }
       });
     } else {
@@ -586,15 +594,24 @@ function ensureFixedLaunchesForMonth(mk){
       if(interval>1&&diff%interval!==0)return;
       const day=String(Math.min(Number(f.dia||1),monthEnd(mk))).padStart(2,'0');
       const data=`${mk}-${day}`;
-      let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk);
-      if(!l){
-        db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'despesa fixa',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id});
-        changed=true;
+      if(f.tipo==='Tr'){
+        let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===true);
+        let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk&&x.transfer_out===false);
+        if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
+        else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
+        if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
+        else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
       } else {
-        // Só atualiza desc/conta/cat se não foi editado manualmente; nunca sobrescreve valor e data manuais
-        let ch2=false;
-        if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
-        if(ch2)changed=true;
+        let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&ym(x.data)===mk);
+        if(!l){
+          db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:status==='pago',origem:'fixo',ref_id:f.id});
+          changed=true;
+        } else {
+          // Só atualiza desc/conta/cat se não foi editado manualmente; nunca sobrescreve valor e data manuais
+          let ch2=false;
+          if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
+          if(ch2)changed=true;
+        }
       }
     }
   });
@@ -1391,7 +1408,8 @@ function pFixos(){const meses=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','
   const rows=[...db.fixos].sort(cmpName).map(f=>{const mCols=meses.map((m,i)=>{const k=`${yy}-${String(i+1).padStart(2,'0')}`,s=f.meses&&f.meses[k];return`<td style="text-align:center"><span class="tag ${s==='pago'?'tag-g':s==='cancelado'?'tag-x':'tag-a'}" style="cursor:pointer;font-size:10px" onclick="toggleFixoMes(${f.id},'${k}')">${s==='pago'?'Pago':s==='cancelado'?'Canc.':'Pend.'}</span></td>`}).join('');
     const fqLabel=FREQ_LABEL[f.frequencia||'mensal']||'Mensal';
     const inicioInfo=f.data_inicio?`${fdt(f.data_inicio)}<br><span style="color:var(--ink3)">${fqLabel}</span>`:fqLabel;
-    return{sort:[f.desc,f.conta,f.data_inicio||'',f.valor,...meses.map((_,i)=>f.meses?.[`${yy}-${String(i+1).padStart(2,'0')}`]||''),''],cells:[`<td><strong>${esc(f.desc)}</strong><br><span class="txt-xs">${esc(catLabel(catById(f.cat_id)))}</span></td>`,`<td>${esc(f.conta)}</td>`,`<td class="txt-xs" style="text-align:center;white-space:nowrap">${inicioInfo}</td>`,`<td class="v-neg">${R(f.valor)}</td>`,mCols,`<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openFixoModal(${f.id})">✏️</button><button class="ico-btn" onclick="toggleFixoAtivo(${f.id})">${f.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delFixo(${f.id})">🗑</button></div></td>`]};
+    const vCls=f.tipo==='R'?'v-pos':f.tipo==='Tr'?'v-neu':'v-neg';
+    return{sort:[f.desc,f.conta,f.data_inicio||'',f.valor,...meses.map((_,i)=>f.meses?.[`${yy}-${String(i+1).padStart(2,'0')}`]||''),''],cells:[`<td><strong>${esc(f.desc)}</strong><br><span class="txt-xs">${tipoTag(f.tipo||'D')} ${esc(catLabel(catById(f.cat_id)))}</span></td>`,`<td>${esc(f.conta)}${f.tipo==='Tr'&&f.conta_destino?`<br><span class="txt-xs" style="color:var(--ink3)">→ ${esc(f.conta_destino)}</span>`:''}</td>`,`<td class="txt-xs" style="text-align:center;white-space:nowrap">${inicioInfo}</td>`,`<td class="${vCls}">${R(f.valor)}</td>`,mCols,`<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openFixoModal(${f.id})">✏️</button><button class="ico-btn" onclick="toggleFixoAtivo(${f.id})">${f.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delFixo(${f.id})">🗑</button></div></td>`]};
   });
   set(`<div class="kpi-row" style="grid-template-columns:repeat(4,1fr)"><div class="kpi c-t"><div class="kpi-lbl">Total Mensal</div><div class="kpi-val">${R(total)}</div></div><div class="kpi c-g"><div class="kpi-lbl">Pago (${meses[mm]})</div><div class="kpi-val">${R(pago)}</div></div><div class="kpi c-r"><div class="kpi-lbl">Pendente (${meses[mm]})</div><div class="kpi-val">${R(total-pago)}</div></div><div class="kpi c-b"><div class="kpi-lbl">Itens ativos</div><div class="kpi-val">${db.fixos.filter(f=>f.ativo).length}</div></div></div>
   <div class="card"><div class="card-head"><h3>Lançamentos Fixos & Recorrentes</h3><button class="btn btn-green btn-sm" onclick="openFixoModal()">+ Nova</button></div>
@@ -1399,6 +1417,13 @@ function pFixos(){const meses=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','
   <div class="tbl-wrap" style="margin-top:12px">${sortableTable('fixos',['Descrição','Conta','Dia','R$/Mês',...meses,''],rows)}</div></div>`)
 }
 function toggleFixoMes(id,k){const f=db.fixos.find(x=>x.id===id);if(!f)return;if(!f.meses)f.meses={};const c=f.meses[k];f.meses[k]=c==='pago'?'cancelado':c==='cancelado'?undefined:'pago';if(!f.meses[k])delete f.meses[k];ensureFixedLaunchesForMonth(k);const l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===id&&ym(x.data)===k);if(l)l.pago=f.meses[k]==='pago';save();pFixos()}
+function fixoTipoChange(){
+  const tp=fv('x-tp');
+  const ct=document.getElementById('x-ct');
+  if(ct){ct.innerHTML=tp==='Tr'?'':sortedCats(tp).map(c=>`<option value="${c.id}">${esc(catLabel(c))}</option>`).join('');}
+  const fgCt=document.getElementById('fg-x-ct');if(fgCt)fgCt.style.display=tp==='Tr'?'none':'';
+  const fgCd=document.getElementById('fg-x-cd');if(fgCd)fgCd.style.display=tp==='Tr'?'':'none';
+}
 function fixoFreqChange(v){
   // Atualiza label da data conforme frequência
   const lbl=document.getElementById('x-di-lbl');
@@ -1427,16 +1452,22 @@ function openFixoModal(eid){
   const f=eid?db.fixos.find(x=>x.id===eid):null;
   const freqOpts=['diario','semanal','quinzenal','mensal','bimestral','trimestral','semestral','anual'];
   const fq=f?f.frequencia:'mensal';
+  const tp=f?(f.tipo||'D'):'D';
   // Label da data conforme frequência
   const diLabel=fq==='diario'?'Data de início':fq==='semanal'||fq==='quinzenal'?'Data de início do ciclo':'Data da 1ª cobrança';
   // Data padrão: usa data_inicio existente, ou hoje
   const dataDefault=f?f.data_inicio:new Date().toISOString().slice(0,10);
+  const catOpts=sortedCats(tp==='Tr'?null:tp).map(c=>`<option value="${c.id}" ${f&&f.cat_id===c.id?'selected':''}>${esc(catLabel(c))}</option>`).join('');
+  const contaOpts=contaNomes().map(n=>`<option ${f&&f.conta===n?'selected':''}>${esc(n)}</option>`).join('');
+  const contaDestOpts=contaNomes().map(n=>`<option ${f&&f.conta_destino===n?'selected':''}>${esc(n)}</option>`).join('');
   showM(f?'Editar Lançamento Fixo':'Novo Lançamento Fixo','modal-lg',`<div class="fgrid">
     <div class="fg full"><label>Descrição *</label><input type="text" id="x-ds" value="${esc(f?f.desc:'')}" placeholder="Netflix, Academia, Aluguel..."></div>
+    <div class="fg"><label>Tipo *</label><select id="x-tp" onchange="fixoTipoChange()"><option value="D"${tp==='D'?' selected':''}>💸 Despesa</option><option value="R"${tp==='R'?' selected':''}>💰 Receita</option><option value="Tr"${tp==='Tr'?' selected':''}>🔄 Transferência</option></select></div>
     <div class="fg"><label>Frequência *</label><select id="x-fq" onchange="fixoFreqChange(this.value)">${freqOpts.map(o=>`<option value="${o}"${fq===o?' selected':''}>${FREQ_LABEL[o]}</option>`).join('')}</select></div>
     <div class="fg"><label id="x-di-lbl">${diLabel} *</label><input type="date" id="x-di" value="${dataDefault}" onchange="fixoCartaoPreview()"></div>
-    <div class="fg"><label>Categoria</label><select id="x-ct">${sortedCats('D').map(c=>`<option value="${c.id}" ${f&&f.cat_id===c.id?'selected':''}>${esc(catLabel(c))}</option>`).join('')}</select></div>
-    <div class="fg"><label>Conta / Cartão</label><select id="x-cn" onchange="fixoCartaoPreview()">${contaNomes().map(n=>`<option ${f&&f.conta===n?'selected':''}>${esc(n)}</option>`).join('')}</select></div>
+    <div class="fg" id="fg-x-ct"${tp==='Tr'?' style="display:none"':''}><label>Categoria</label><select id="x-ct">${catOpts}</select></div>
+    <div class="fg"><label>Conta / Cartão</label><select id="x-cn" onchange="fixoCartaoPreview()">${contaOpts}</select></div>
+    <div class="fg" id="fg-x-cd"${tp!=='Tr'?' style="display:none"':''}><label>Conta Destino *</label><select id="x-cd">${contaDestOpts}</select></div>
     <div class="fg"><label>Valor por ocorrência (R$) *</label><input type="number" id="x-vl" step="0.01" value="${f?f.valor:''}" placeholder="0,00" oninput="fixoCartaoPreview()"></div>
     <div class="fg"><label>Duração (meses, 0=indefinido)</label><input type="number" id="x-rp" min="0" value="${f?f.repetir_meses:0}"></div>
     <div class="fg full" id="fg-x-fatura-tip" style="display:none"><div class="tip tip-blue" id="x-fatura-tip"></div></div>
@@ -1444,20 +1475,21 @@ function openFixoModal(eid){
   setTimeout(fixoCartaoPreview,50);
 }
 function saveFixo(eid,andNew){
-  const ds=fv('x-ds').trim(),fq=fv('x-fq')||'mensal',ct=parseInt(fv('x-ct')),cn=fv('x-cn'),vl=parseFloat(fv('x-vl')),rp=parseInt(fv('x-rp'))||0;
+  const ds=fv('x-ds').trim(),tp=fv('x-tp')||'D',fq=fv('x-fq')||'mensal',ct=parseInt(fv('x-ct')),cn=fv('x-cn'),cd=fv('x-cd')||'',vl=parseFloat(fv('x-vl')),rp=parseInt(fv('x-rp'))||0;
   const di=fv('x-di')||new Date().toISOString().slice(0,10);
   if(!ds||!vl||!di){alert('Preencha os campos obrigatórios.');return}
+  if(tp==='Tr'&&!cd){alert('Selecione a Conta Destino para Transferência.');return}
   // Para freq mensais+, dia do mês vem da data de início
   const da=fq==='diario'?1:parseInt(di.slice(8,10))||1;
   if(eid){
     const i=db.fixos.findIndex(f=>f.id===eid);
     const old=db.fixos[i];
-    db.fixos[i]={...old,desc:ds,frequencia:fq,cat_id:ct,conta:cn,dia:da,valor:vl,repetir_meses:rp,data_inicio:di};
-    if(old.frequencia!==fq||old.valor!==vl||old.data_inicio!==di){
+    db.fixos[i]={...old,desc:ds,tipo:tp,frequencia:fq,cat_id:ct,conta:cn,conta_destino:tp==='Tr'?cd:'',dia:da,valor:vl,repetir_meses:rp,data_inicio:di};
+    if(old.frequencia!==fq||old.valor!==vl||old.data_inicio!==di||old.tipo!==tp){
       db.lancamentos=db.lancamentos.filter(l=>!(l.origem==='fixo'&&l.ref_id===eid&&l.pago===false));
     }
   } else {
-    db.fixos.push({id:nid(db.fixos),desc:ds,frequencia:fq,cat_id:ct,conta:cn,dia:da,valor:vl,ativo:true,meses:{},repetir_meses:rp,data_inicio:di});
+    db.fixos.push({id:nid(db.fixos),desc:ds,tipo:tp,frequencia:fq,cat_id:ct,conta:cn,conta_destino:tp==='Tr'?cd:'',dia:da,valor:vl,ativo:true,meses:{},repetir_meses:rp,data_inicio:di});
   }
   save();closeM();if(andNew)openFixoModal();else pFixos();
 }
@@ -2279,13 +2311,8 @@ function migrateDB_quiet(){
   db.categorias.forEach(c=>{if(c.parent_id===undefined)c.parent_id=null;if(!c.icone)c.icone='📌';if(!c.cor)c.cor=c.tipo==='R'?'#00875a':'#c9283e'});
   db.lancamentos.forEach(l=>{if(l.pago===undefined)l.pago=true;if(!l.origem)l.origem=l.importado?'importado':'manual';l.valor=Number(l.valor||0)});
   db.parcelados.forEach(p=>{if(!p.primeira_data)p.primeira_data=p.data;if(p.pg===undefined)p.pg=0});
-  db.fixos.forEach(f=>{if(!f.meses)f.meses={};f.valor=Number(f.valor||0);if(f.repetir_meses===undefined)f.repetir_meses=0;if(!f.data_inicio)f.data_inicio=new Date().toISOString().slice(0,10);if(!f.frequencia)f.frequencia='mensal';});
+  db.fixos.forEach(f=>{if(!f.meses)f.meses={};f.valor=Number(f.valor||0);if(f.repetir_meses===undefined)f.repetir_meses=0;if(!f.data_inicio)f.data_inicio=new Date().toISOString().slice(0,10);if(!f.frequencia)f.frequencia='mensal';if(!f.tipo)f.tipo='D';});
   db.parcelados.forEach(p=>{if(!db.lancamentos.some(l=>l.origem==='parcelado'&&l.ref_id===p.id))regenerateParcelLaunches(p)});
   db.lancamentos.forEach(l=>{if(l.origem==='pagamento_fatura')l.origem='provisao_fatura';});
   sanitizeDB(); // limpa órfãos
 }
-
-bootApp();
-</script>
-</body>
-</html>
