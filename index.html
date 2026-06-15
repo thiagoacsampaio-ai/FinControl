@@ -823,7 +823,8 @@ function getAporteInfo(){
     d.setDate(d.getDate()+1);
   }
   if(minSaldo>=0)return null;
-  return{aporte:Math.ceil(Math.abs(minSaldo)+200),diaAporte:addDays(minDia,-3),diaCritico:minDia};
+  const diaCritico=minDia||hoje;
+  return{aporte:Math.ceil(Math.abs(minSaldo)+200),diaAporte:addDays(diaCritico,-3),diaCritico};
 }
 function getCatPaiStats(lancamentos){
   const stats={};
