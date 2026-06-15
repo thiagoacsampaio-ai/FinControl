@@ -452,6 +452,7 @@ function save(){
       const {fs,doc,setDoc}=_fire;
       await setDoc(doc(fs,DB_DOC),{data:JSON.stringify(db),updatedAt:Date.now()});
     }catch(e){console.error('Firestore save error:',e);}
+    finally{_saveTimeout=null;}
   },800);
 }
 let db = loadDB();
@@ -2273,8 +2274,8 @@ async function bootApp(){
         } else {
           // Primeira vez: subir seed
           save();
+          go(page);
         }
-        go(page);
       });
 
       // Primeiro carregamento
