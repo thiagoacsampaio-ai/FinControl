@@ -7,7 +7,8 @@ service cloud.firestore {
     function isAllowed() {
       return request.auth != null &&
              request.auth.token.email in [
-               'thiagoacsampaio@gmail.com'
+               'thiagoacsampaio@gmail.com',
+               'casorio.et@gmail.com'
              ];
     }
 
