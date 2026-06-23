@@ -479,10 +479,14 @@ function isContaBancaria(nome){return !!db.contas.find(c=>c.nome===nome)}
 function isEntrada(t){return t==='R'||t==='Res'}
 function isSaida(t){return t==='D'||t==='I'}
 function signedValue(l){if(l.tipo==='Tr'){return l.transfer_out?-Number(l.valor||0):Number(l.valor||0)}return isEntrada(l.tipo)?Number(l.valor||0):isSaida(l.tipo)?-Number(l.valor||0):0}
-function lancEfetivo(l, considerarPendentes=false){return considerarPendentes || l.pago!==false || l.tipo==='Tr'}
+function lancEfetivo(l, considerarPendentes=false){return considerarPendentes || l.pago!==false}
 function saldoConta(nome, ate=null, considerarPendentes=false){const c=db.contas.find(x=>x.nome===nome); const base=c?Number(c.saldo_ini||0):0;if(!c)return 0;return base+db.lancamentos.filter(l=>l.conta===nome && (!ate||l.data<=ate) && lancEfetivo(l,considerarPendentes)).reduce((s,l)=>s+signedValue(l),0)}
 function saldoContaDia(nome,data){return saldoConta(nome,data,false)}
 function gastoCartao(nome){return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D').reduce((s,l)=>s+Number(l.valor||0),0)}
+// Mês-fatura (YYYY-MM, base no fechamento) ao qual uma compra pertence
+function faturaMesCompra(c,dataStr){const p=String(dataStr).split('-');const y=+p[0],m=+p[1],day=+p[2];let fy=y,fm=m;if(day>c.fechamento){fm++;if(fm>12){fm=1;fy++;}}return `${fy}-${String(fm).padStart(2,'0')}`;}
+// Fatura em aberto = compras cujo mês-fatura ainda NÃO foi pago (= limite utilizado)
+function faturaAberta(nome){const c=db.cartoes.find(x=>x.nome===nome);if(!c)return 0;return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D'&&!db.faturas_pagas.some(fp=>fp.cartao_id===c.id&&fp.mes===faturaMesCompra(c,l.data))).reduce((s,l)=>s+Number(l.valor||0),0);}
 function tipoTag(t){if(t==='R') return '<span class="tag tag-g">Receita</span>'; if(t==='D') return '<span class="tag tag-r">Despesa</span>'; if(t==='I') return '<span class="tag tag-b">Investimento</span>'; if(t==='Res') return '<span class="tag tag-t">Resgate</span>'; if(t==='Tr') return '<span class="tag tag-x">Transferência</span>'; return '<span class="tag tag-x">'+esc(t)+'</span>'}
 function vClass(t,transfer_out){if(t==='Tr')return transfer_out?'v-neg':'v-pos';return isEntrada(t)?'v-pos':t==='I'?'v-neu':'v-neg'}
 function vSign(t,transfer_out){if(t==='Tr')return transfer_out?'-':'+';return isEntrada(t)?'+':t==='I'?'▸':'-'}
@@ -883,7 +887,7 @@ function pPainel(){
   const totalPF=db.contas.filter(c=>c.subtipo==='PF'&&c.ativo).reduce((s,c)=>s+saldoConta(c.nome),0);
   const totalPJ=db.contas.filter(c=>c.subtipo==='PJ'&&c.ativo).reduce((s,c)=>s+saldoConta(c.nome),0);
   const totalInv=db.contas.filter(c=>c.tipo==='Investimento'&&c.ativo).reduce((s,c)=>s+saldoConta(c.nome),0);
-  const totalCart=db.cartoes.filter(c=>c.ativo).reduce((s,c)=>s+gastoCartao(c.nome),0);
+  const totalCart=db.cartoes.filter(c=>c.ativo).reduce((s,c)=>s+faturaAberta(c.nome),0);
   const mk=new Date().toISOString().slice(0,7);
   const mesL=db.lancamentos.filter(l=>l.data&&l.data.startsWith(mk)&&!isCartaoPurchase(l));
   const recM=mesL.filter(l=>l.tipo==='R'&&l.pago!==false).reduce((s,l)=>s+l.valor,0);
@@ -911,6 +915,22 @@ function pPainel(){
   function miniBar(pct,lbl){const c2=pct>=65?'#00875a':pct>=35?'#b45309':'#c9283e';return`<div style="margin-top:7px"><div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px"><span style="color:var(--ink2)">${lbl}</span><span style="font-weight:600;color:${c2}">${Math.round(pct)}%</span></div><div class="pbar"><div class="pfill" style="width:${Math.min(100,pct).toFixed(0)}%;background:${c2}"></div></div></div>`;}
 
   set(`
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <h3 style="margin:0;font-size:14px">Resumo geral</h3>
+    <div class="hint-wrap" style="position:relative">
+      <button class="ico-btn hint-btn" style="font-size:12px;width:22px;height:22px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center" onclick="this.nextElementSibling.classList.toggle('hidden')">ℹ</button>
+      <div class="hidden" style="position:absolute;right:0;top:28px;width:330px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-md);padding:14px;z-index:200;font-size:11px;line-height:1.6;text-align:left">
+        <div style="font-weight:700;margin-bottom:8px;font-size:12px">O que cada resumo considera</div>
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <div><span style="font-weight:600">Saldo PF / Saldo PJ</span><br>Saldo atual das contas (pessoa física / jurídica) considerando apenas lançamentos <strong>efetivados</strong> (não inclui provisionados/pendentes).</div>
+          <div><span style="font-weight:600">Investimentos</span><br>Saldo atual das contas do tipo Investimento.</div>
+          <div><span style="font-weight:600">Faturas abertas</span><br>Soma das compras de cartão cujas faturas <strong>ainda não foram pagas</strong> (limite utilizado).</div>
+          <div><span style="font-weight:600">Receitas mês / Despesas mês</span><br>Lançamentos do mês atual já <strong>efetivados</strong> (status Pago). Despesas incluem pagamentos de fatura; não inclui compras avulsas no cartão.</div>
+          <div><span style="font-weight:600">Pendente</span><br>Lançamentos do mês atual ainda <strong>não efetivados</strong> (provisionados), exceto receitas.</div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="kpi-row">
     <div class="kpi c-b"><div class="kpi-lbl">Saldo PF</div><div class="kpi-val">${R(totalPF)}</div></div>
     <div class="kpi c-a"><div class="kpi-lbl">Saldo PJ</div><div class="kpi-val">${R(totalPJ)}</div></div>
@@ -1519,11 +1539,23 @@ function delConta(id){if(!confirm('Excluir conta? Os lançamentos não serão re
 
 // ── CARTÕES ──────────────────────────────────────────────────────────
 function pCartoes(){const cards=sortedCartoes();
-  const rows=cards.map(c=>{const g=gastoCartao(c.nome),cv=db.contas.find(x=>x.id===c.conta_id);
+  const rows=cards.map(c=>{const g=faturaAberta(c.nome),cv=db.contas.find(x=>x.id===c.conta_id);
     return{sort:[c.nome,c.bandeira,cv?cv.nome:'',c.fechamento,c.vencimento,c.limite,g,c.limite-g,''],cells:[`<td><span class="dot" style="background:${c.cor};margin-right:7px"></span><strong>${esc(c.nome)}</strong></td>`,`<td>${esc(c.bandeira)}</td>`,`<td>${esc(cv?cv.nome:'—')}</td>`,`<td class="mono txt-xs">Dia ${c.fechamento}</td>`,`<td class="mono txt-xs">Dia ${c.vencimento}</td>`,`<td class="mono txt-xs">${R(c.limite)}</td>`,`<td class="v-neg">${R(g)}</td>`,`<td class="${(c.limite-g)>=0?'v-pos':'v-neg'}">${R(c.limite-g)}</td>`,`<td><div style="display:flex;gap:3px"><button class="btn btn-ghost btn-xs" onclick="openFaturaCartao(${c.id},'${new Date().toISOString().slice(0,7)}')">Fatura</button><button class="ico-btn" onclick="openCartaoModal(${c.id})">✏️</button><button class="ico-btn" onclick="toggleCartaoAtivo(${c.id})">${c.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delCartao(${c.id})">🗑</button></div></td>`]};
   });
-  set(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">${cards.filter(c=>c.ativo).map(c=>{const g=gastoCartao(c.nome),pct=Math.min(100,g/c.limite*100);const mk=new Date().toISOString().slice(0,7);const fp=db.faturas_pagas.find(x=>x.cartao_id===c.id&&x.mes===mk);return`<div class="kpi" style="cursor:pointer" onclick="openFaturaCartao(${c.id},'${mk}')"><div class="kpi-lbl" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:4px"><span class="dot" style="background:${c.cor}"></span>${esc(c.nome)}</span>${fp?'<span class="tag tag-g" style="font-size:9px">✓ Paga</span>':'<span class="tag tag-a" style="font-size:9px">Aberta</span>'}</div><div class="kpi-val" style="color:var(--red)">${R(g)}</div><div class="kpi-sub">Limite ${R(c.limite)} · Disponível ${R(c.limite-g)}</div><div class="pbar" style="margin-top:8px"><div class="pfill" style="width:${pct}%;background:${pct>80?'#c9283e':pct>50?'#b45309':'#00875a'}"></div></div><div style="margin-top:6px;font-size:10px;color:var(--blue)">👁 Ver fatura completa</div></div>`}).join('')}</div>
-  <div class="card"><div class="card-head"><h3>Cartões</h3><button class="btn btn-green btn-sm" onclick="openCartaoModal()">+ Novo Cartão</button></div><div class="tbl-wrap">${sortableTable('cartoes',['Cartão','Bandeira','Conta Vinculada','Fecha','Vence','Limite','Fatura','Disponível',''],rows)}</div></div>`)
+  set(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">${cards.filter(c=>c.ativo).map(c=>{const g=faturaAberta(c.nome),pct=Math.min(100,g/c.limite*100);const mk=new Date().toISOString().slice(0,7);const fp=db.faturas_pagas.find(x=>x.cartao_id===c.id&&x.mes===mk);return`<div class="kpi" style="cursor:pointer" onclick="openFaturaCartao(${c.id},'${mk}')"><div class="kpi-lbl" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:4px"><span class="dot" style="background:${c.cor}"></span>${esc(c.nome)}</span>${fp?'<span class="tag tag-g" style="font-size:9px">✓ Paga</span>':'<span class="tag tag-a" style="font-size:9px">Aberta</span>'}</div><div class="kpi-val" style="color:var(--red)">${R(g)}</div><div class="kpi-sub">Limite ${R(c.limite)} · Disponível ${R(c.limite-g)}</div><div class="pbar" style="margin-top:8px"><div class="pfill" style="width:${pct}%;background:${pct>80?'#c9283e':pct>50?'#b45309':'#00875a'}"></div></div><div style="margin-top:6px;font-size:10px;color:var(--blue)">👁 Ver fatura completa</div></div>`}).join('')}</div>
+  <div class="card"><div class="card-head"><h3>Cartões</h3><div style="display:flex;align-items:center;gap:8px">
+    <div class="hint-wrap" style="position:relative">
+      <button class="ico-btn hint-btn" style="font-size:12px;width:22px;height:22px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center" onclick="this.nextElementSibling.classList.toggle('hidden')">ℹ</button>
+      <div class="hidden" style="position:absolute;right:0;top:28px;width:300px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-md);padding:14px;z-index:200;font-size:11px;line-height:1.6;text-align:left">
+        <div style="font-weight:700;margin-bottom:8px;font-size:12px">Como ler estas colunas</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div><span style="font-weight:600">Limite</span><br>Limite total cadastrado no cartão.</div>
+          <div><span style="font-weight:600">Fatura aberta</span><br>Soma das compras cujas faturas <strong>ainda não foram pagas</strong> (limite utilizado). Ao pagar a fatura, essas compras saem deste valor.</div>
+          <div><span style="font-weight:600">Limite disponível</span><br>Limite total − Fatura aberta.</div>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-green btn-sm" onclick="openCartaoModal()">+ Novo Cartão</button></div></div><div class="tbl-wrap">${sortableTable('cartoes',['Cartão','Bandeira','Conta Vinculada','Fecha','Vence','Limite','Fatura aberta','Limite disponível',''],rows)}</div></div>`)
 }
 function openCartaoModal(eid){const c=eid?db.cartoes.find(x=>x.id===eid):null;showM(c?'Editar Cartão':'Novo Cartão','modal-lg',`<div class="fgrid"><div class="fg full"><label>Nome do Cartão *</label><input type="text" id="k-nm" value="${esc(c?c.nome:'')}" placeholder="Ex: Nubank Roxinho"></div><div class="fg"><label>Bandeira</label><select id="k-bd">${['Mastercard','Visa','Elo','American Express','Hipercard','Outros'].map(b=>`<option ${c&&c.bandeira===b?'selected':''}>${b}</option>`).join('')}</select></div><div class="fg"><label>Conta Vinculada</label><select id="k-ct"><option value="">— Nenhuma —</option>${db.contas.filter(x=>x.ativo).sort(cmpName).map(x=>`<option value="${x.id}" ${c&&c.conta_id===x.id?'selected':''}>${esc(x.nome)}</option>`).join('')}</select></div><div class="fg"><label>Dia de Fechamento</label><input type="number" id="k-fc" min="1" max="31" value="${c?c.fechamento:1}"></div><div class="fg"><label>Dia de Vencimento</label><input type="number" id="k-vc" min="1" max="31" value="${c?c.vencimento:10}"></div><div class="fg"><label>Limite Total (R$) *</label><input type="number" id="k-lm" step="0.01" value="${c?c.limite:''}"></div><div class="fg"><label>Cor</label><input type="color" id="k-cor" value="${c?c.cor:CORES_PRESET[0]}" style="height:38px"></div></div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveCartao(${eid||0},true)">${c?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveCartao(${eid||0})">${c?'Salvar':'Criar Cartão'}</button>`)}
 function saveCartao(eid,andNew){const nm=fv('k-nm').trim(),bd=fv('k-bd'),ct=parseInt(fv('k-ct'))||null,fc=parseInt(fv('k-fc'))||1,vc=parseInt(fv('k-vc'))||10,lm=parseFloat(fv('k-lm'))||0,cor=fv('k-cor');if(!nm||!lm){alert('Preencha os campos obrigatórios.');return}if(eid){const i=db.cartoes.findIndex(c=>c.id===eid),old=db.cartoes[i].nome;db.cartoes[i]={...db.cartoes[i],nome:nm,bandeira:bd,conta_id:ct,fechamento:fc,vencimento:vc,limite:lm,cor};db.lancamentos.forEach(l=>{if(l.conta===old)l.conta=nm})}else db.cartoes.push({id:nid(db.cartoes),nome:nm,bandeira:bd,conta_id:ct,fechamento:fc,vencimento:vc,limite:lm,cor,ativo:true});save();closeM();if(andNew)openCartaoModal();else pCartoes()}
@@ -1837,7 +1869,7 @@ function dailyForecast(ini,fim,contaFiltro=''){
     const movs=db.lancamentos.filter(l=>l.data===ds&&isContaBancaria(l.conta)&&(!contaFiltro||l.conta===contaFiltro));
     movs.forEach(l=>{saldos[l.conta]=(saldos[l.conta]||0)+signedValue(l)});
     const total=Object.values(saldos).reduce((s,v)=>s+v,0);
-    days.push({data:ds,total,saldos:{...saldos},entradas:movs.filter(l=>isEntrada(l.tipo)).reduce((s,l)=>s+l.valor,0),saidas:movs.filter(l=>isSaida(l.tipo)).reduce((s,l)=>s+l.valor,0),movs});
+    days.push({data:ds,total,saldos:{...saldos},entradas:movs.filter(l=>isEntrada(l.tipo)||(l.tipo==='Tr'&&!l.transfer_out)).reduce((s,l)=>s+l.valor,0),saidas:movs.filter(l=>isSaida(l.tipo)||(l.tipo==='Tr'&&l.transfer_out)).reduce((s,l)=>s+l.valor,0),movs});
     d.setDate(d.getDate()+1)
   }
   return days
@@ -1890,8 +1922,8 @@ function futureCashFlow(ini, fim, contaFiltro=''){
     const faturaTotal=faturas.reduce((s,f)=>s+f.valor,0);
     movs.forEach(l=>{saldos[l.conta]=(saldos[l.conta]||0)+signedValue(l)});
     saldoAcum=Object.values(saldos).reduce((s,v)=>s+v,0)-faturaTotal;
-    const entradas=movs.filter(l=>isEntrada(l.tipo)).reduce((s,l)=>s+l.valor,0);
-    const saidas=movs.filter(l=>isSaida(l.tipo)).reduce((s,l)=>s+l.valor,0)+faturaTotal;
+    const entradas=movs.filter(l=>isEntrada(l.tipo)||(l.tipo==='Tr'&&!l.transfer_out)).reduce((s,l)=>s+l.valor,0);
+    const saidas=movs.filter(l=>isSaida(l.tipo)||(l.tipo==='Tr'&&l.transfer_out)).reduce((s,l)=>s+l.valor,0)+faturaTotal;
     const isFuture=ds>hoje;
     days.push({data:ds,saldoAcum,entradas,saidas,faturas,movs,isFuture});
     d.setDate(d.getDate()+1);
@@ -2182,7 +2214,7 @@ function delUser(id){if(!confirm('Excluir usuário?'))return;users=users.filter(
 function tableData(name){
   if(name==='lancamentos')return [['Data','Descrição','Categoria','Conta','Tipo','Valor','Pago','Origem','Parcela'],...db.lancamentos.map(l=>[l.data,l.desc,catFullName(catById(l.cat_id)),l.conta,l.tipo,l.valor,l.pago!==false?'Pago':'Pendente',l.origem||'manual',l.parcela_num?`${l.parcela_num}/${l.parcela_total}`:''])];
   if(name==='contas')return [['Nome','Tipo','Natureza','Saldo inicial','Saldo atual','Ativo'],...db.contas.map(c=>[c.nome,c.tipo,c.subtipo,c.saldo_ini,saldoConta(c.nome),c.ativo?'Sim':'Não'])];
-  if(name==='cartoes')return [['Nome','Bandeira','Conta vinculada','Fechamento','Vencimento','Limite','Fatura','Ativo'],...db.cartoes.map(c=>[c.nome,c.bandeira,db.contas.find(x=>x.id===c.conta_id)?.nome||'',c.fechamento,c.vencimento,c.limite,gastoCartao(c.nome),c.ativo?'Sim':'Não'])];
+  if(name==='cartoes')return [['Nome','Bandeira','Conta vinculada','Fechamento','Vencimento','Limite','Fatura aberta','Limite disponível','Ativo'],...db.cartoes.map(c=>{const fa=faturaAberta(c.nome);return [c.nome,c.bandeira,db.contas.find(x=>x.id===c.conta_id)?.nome||'',c.fechamento,c.vencimento,c.limite,fa,c.limite-fa,c.ativo?'Sim':'Não'];})];
   if(name==='categorias')return [['Nome','Tipo','Pai','Ícone','Cor'],...db.categorias.map(c=>[c.nome,c.tipo,c.parent_id?catById(c.parent_id).nome:'',c.icone,c.cor])];
   if(name==='parcelados')return [['Descrição','Categoria','Conta','Compra','Primeira parcela','Total','Parcelas','Pagas'],...db.parcelados.map(p=>[p.desc,catFullName(catById(p.cat_id)),p.conta,p.data,p.primeira_data,p.total,p.np,p.pg])];
   if(name==='fixos')return [['Descrição','Categoria','Conta','Dia','Valor','Ativo'],...db.fixos.map(f=>[f.desc,catFullName(catById(f.cat_id)),f.conta,f.dia,f.valor,f.ativo?'Sim':'Não'])];
