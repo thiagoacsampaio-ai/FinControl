@@ -194,8 +194,18 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
 
+/* ── CAT COMBOBOX ── */
+.catcombo{position:relative}
+.catcombo-dd{position:absolute;top:calc(100% + 2px);left:0;right:0;max-height:220px;overflow-y:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh-md);z-index:60}
+.catcombo-opt{padding:7px 11px;cursor:pointer;font-size:13px}
+.catcombo-opt:hover,.catcombo-opt.sel{background:var(--blue-bg)}
+
+/* ── STICKY BAR (navegação de mês) ── */
+.sticky-bar{position:sticky;top:0;margin:-24px -24px 16px;padding:16px 24px 12px;background:var(--canvas);z-index:40;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+
 /* ── MOBILE ── */
 @media(max-width:700px){
+  .sticky-bar{margin:-12px -12px 12px;padding:10px 12px 8px}
   :root{--sidebar-w:0px}
   #shell{flex-direction:column}
   #sidebar{display:none;position:fixed;inset:0;z-index:800;width:100%;height:100%;overflow-y:auto}
@@ -250,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.3 ☁</span>
+    <span>v3.4 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -363,6 +373,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 // v3.3: gestão de faturas refeita — cálculo unificado (faturaMesCompra é a
 // fonte única de verdade), fim da duplicação fatura/provisão em Lançamentos,
 // pagamento parcial com saldo rolado, telas Cartões/Faturas clarificadas.
+// v3.4: Fixos com visão mensal (baixa rápida, barra sticky) + visão anual;
+// fixos pendentes não consomem limite do cartão (só após a baixa);
+// combobox de categoria com busca por nome (ignora emoji/acentos).
 // ════════════════════════════════════════════════════════════════════
 const DB_DOC = 'shared/fincontrol'; // caminho único compartilhado no Firestore
 const ALLOWED_EMAILS = ['thiagoacsampaio@gmail.com', 'casorio.et@gmail.com']; // lista de e-mails com acesso permitido
@@ -493,8 +506,9 @@ function saldoContaDia(nome,data){return saldoConta(nome,data,false)}
 // Mês-fatura (YYYY-MM, base no fechamento) ao qual uma compra pertence.
 // Comparação por dia — sem objetos Date, sem rollover em meses curtos.
 function faturaMesCompra(c,dataStr){const p=String(dataStr).split('-');const y=+p[0],m=+p[1],day=+p[2];let fy=y,fm=m;if(day>c.fechamento){fm++;if(fm>12){fm=1;fy++;}}return `${fy}-${String(fm).padStart(2,'0')}`;}
-// Limite utilizado = compras (e resíduos) cujo mês-fatura ainda NÃO foi pago
-function faturaAberta(nome){const c=db.cartoes.find(x=>x.nome===nome);if(!c)return 0;return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D'&&!db.faturas_pagas.some(fp=>fp.cartao_id===c.id&&fp.mes===faturaMesCompra(c,l.data))).reduce((s,l)=>s+Number(l.valor||0),0);}
+// Limite utilizado = compras (e resíduos) cujo mês-fatura ainda NÃO foi pago.
+// Lançamentos FIXOS pendentes (ainda não efetivados/cobrados) NÃO consomem limite.
+function faturaAberta(nome){const c=db.cartoes.find(x=>x.nome===nome);if(!c)return 0;return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D'&&!(l.origem==='fixo'&&l.pago===false)&&!db.faturas_pagas.some(fp=>fp.cartao_id===c.id&&fp.mes===faturaMesCompra(c,l.data))).reduce((s,l)=>s+Number(l.valor||0),0);}
 // Total da fatura de um mês específico (chave = mês de fechamento)
 function faturaTotalMes(cartaoId,mes){return getFaturaTransacoes(cartaoId,mes).reduce((s,l)=>s+Number(l.valor||0),0);}
 // Rótulo de exibição da fatura: mês/ano do VENCIMENTO
@@ -503,6 +517,49 @@ function tipoTag(t){if(t==='R') return '<span class="tag tag-g">Receita</span>';
 function vClass(t,transfer_out){if(t==='Tr')return transfer_out?'v-neg':'v-pos';return isEntrada(t)?'v-pos':t==='I'?'v-neu':'v-neg'}
 function vSign(t,transfer_out){if(t==='Tr')return transfer_out?'-':'+';return isEntrada(t)?'+':t==='I'?'▸':'-'}
 function origemTag(l){if(l.origem==='fixo')return '<span class="tag tag-a txt-xs">fixo</span>'; if(l.origem==='parcelado')return '<span class="tag tag-p txt-xs">parcelado</span>'; if(l.origem==='provisao_fatura')return '<span class="tag tag-t txt-xs">💳 fatura</span>'; if(l.origem==='residual_fatura')return '<span class="tag tag-a txt-xs">↪ saldo anterior</span>'; return l.importado?'<span class="tag tag-b txt-xs">importado</span>':'<span class="tag tag-x txt-xs">manual</span>'}
+
+// ── CATEGORIA COMBOBOX (busca por nome; ignora emoji e acentos) ──────
+const _norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+function catComboHTML(fieldId,tipo,selId){
+  const cats=sortedCats(tipo||null);
+  const sel=cats.find(c=>String(c.id)===String(selId))||cats[0];
+  return `<div class="catcombo"><input type="hidden" id="${fieldId}" value="${sel?sel.id:''}" data-tipo="${tipo||''}"><input type="text" id="${fieldId}-txt" value="${sel?esc(catLabel(sel)):''}" placeholder="Digite para buscar..." autocomplete="off" onfocus="this.select();catComboFilter('${fieldId}')" oninput="catComboFilter('${fieldId}')" onkeydown="catComboKey(event,'${fieldId}')" onblur="setTimeout(()=>catComboClose('${fieldId}'),160)"><div id="${fieldId}-dd" class="catcombo-dd hidden"></div></div>`;
+}
+function catComboCats(fieldId){const h=document.getElementById(fieldId);return sortedCats(h&&h.dataset.tipo?h.dataset.tipo:null);}
+function catComboFilter(fieldId){
+  const txt=document.getElementById(fieldId+'-txt'),dd=document.getElementById(fieldId+'-dd');
+  if(!txt||!dd)return;
+  const q=_norm(txt.value);
+  const cats=catComboCats(fieldId).filter(c=>!q||_norm(catFullName(c)).includes(q));
+  dd.innerHTML=cats.length
+    ?cats.map((c,i)=>`<div class="catcombo-opt${i===0?' sel':''}" data-id="${c.id}" onmousedown="event.preventDefault();catComboPick('${fieldId}',${c.id})">${c.icone||''} ${esc(catFullName(c))}</div>`).join('')
+    :`<div class="catcombo-opt" style="color:var(--ink3);cursor:default">Nenhuma categoria encontrada</div>`;
+  dd.classList.remove('hidden');
+}
+function catComboPick(fieldId,id){
+  const c=catComboCats(fieldId).find(x=>x.id==id);if(!c)return;
+  const h=document.getElementById(fieldId),txt=document.getElementById(fieldId+'-txt');
+  if(h)h.value=c.id;if(txt)txt.value=catLabel(c);
+  const dd=document.getElementById(fieldId+'-dd');if(dd)dd.classList.add('hidden');
+}
+function catComboClose(fieldId){
+  const dd=document.getElementById(fieldId+'-dd'),h=document.getElementById(fieldId),txt=document.getElementById(fieldId+'-txt');
+  if(dd)dd.classList.add('hidden');
+  // restaura texto coerente com a seleção vigente (evita texto solto sem escolha)
+  if(h&&txt){const c=catComboCats(fieldId).find(x=>String(x.id)===String(h.value));if(c)txt.value=catLabel(c);}
+}
+function catComboKey(e,fieldId){
+  if(e.key==='Enter'){e.preventDefault();const first=document.querySelector('#'+fieldId+'-dd .catcombo-opt[data-id]');if(first)catComboPick(fieldId,parseInt(first.dataset.id));}
+  else if(e.key==='Escape'){catComboClose(fieldId);}
+}
+function catComboSetTipo(fieldId,tipo){
+  const h=document.getElementById(fieldId);if(!h)return;
+  h.dataset.tipo=tipo||'';
+  const cats=sortedCats(tipo||null);
+  const cur=cats.find(c=>String(c.id)===String(h.value))||cats[0];
+  h.value=cur?cur.id:'';
+  const txt=document.getElementById(fieldId+'-txt');if(txt)txt.value=cur?catLabel(cur):'';
+}
 
 // ── fatura do cartão para uma data de lançamento (derivado do canônico) ──
 function faturaCartao(nomeCartao, dataLanc){
@@ -927,7 +984,7 @@ function pPainel(){
         <div style="display:flex;flex-direction:column;gap:7px">
           <div><span style="font-weight:600">Saldo PF / Saldo PJ</span><br>Saldo atual das contas (pessoa física / jurídica) considerando apenas lançamentos <strong>efetivados</strong> (não inclui provisionados/pendentes).</div>
           <div><span style="font-weight:600">Investimentos</span><br>Saldo atual das contas do tipo Investimento.</div>
-          <div><span style="font-weight:600">Faturas abertas</span><br>Soma das compras de cartão cujas faturas <strong>ainda não foram pagas</strong> (limite utilizado).</div>
+          <div><span style="font-weight:600">Faturas abertas</span><br>Soma das compras de cartão cujas faturas <strong>ainda não foram pagas</strong> (limite utilizado). Lançamentos fixos pendentes não entram — só após a baixa.</div>
           <div><span style="font-weight:600">Receitas mês / Despesas mês</span><br>Lançamentos do mês atual já <strong>efetivados</strong> (status Pago). Despesas incluem pagamentos de fatura; não inclui compras avulsas no cartão.</div>
           <div><span style="font-weight:600">Pendente</span><br>Lançamentos do mês atual ainda <strong>não efetivados</strong> (provisionados), exceto receitas.</div>
         </div>
@@ -1103,13 +1160,12 @@ function openLancModal(eid, reuseParams=false){
   const selPago=l?l.pago!==false:(dp?.pago!==false??true);
   const contasOpts=(sel)=>db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<option ${sel&&sel===c.nome?'selected':''}>${esc(c.nome)}</option>`).join('');
   const initCatFiltro=selTipo==='D'||selTipo==='I'?'D':selTipo==='R'||selTipo==='Res'?'R':null;
-  const initCats=isTr?[]:initCatFiltro?sortedCats(initCatFiltro):sortedCats();
   showM(l?'Editar Lançamento':'Novo Lançamento','modal-lg',`
     <div class="fgrid">
       <div class="fg"><label>Data *</label><input type="date" id="f-dt" value="${l?l.data:new Date().toISOString().slice(0,10)}"></div>
       <div class="fg"><label>Tipo *</label><select id="f-tp" onchange="lancTipoChange(this.value)">${[['R','Receita'],['D','Despesa'],['I','Investimento'],['Res','Resgate'],['Tr','Transferência']].map(([v,n])=>`<option value="${v}" ${selTipo===v?'selected':''}>${n}</option>`).join('')}</select></div>
       <div class="fg full"><label>Descrição</label><input type="text" id="f-ds" value="${esc(l?l.desc:'')}" placeholder="Deixe em branco para gerar automaticamente"></div>
-      <div class="fg" id="fg-cat"><label>Categoria *</label><select id="f-ct">${initCats.map(c=>`<option value="${c.id}" ${selCat==c.id?'selected':''}>${esc(catLabel(c))}</option>`).join('')}</select></div>
+      <div class="fg" id="fg-cat"><label>Categoria * <span class="txt-xs" style="font-weight:400;color:var(--ink3)">(digite para buscar)</span></label>${catComboHTML('f-ct',initCatFiltro,selCat)}</div>
       <div class="fg" id="fg-conta-normal" style="${isTr?'display:none':''}"><label>Conta / Cartão *</label><select id="f-cn"><optgroup label="Contas">${db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<option ${selConta===c.nome?'selected':''}>${esc(c.nome)}</option>`).join('')}</optgroup><optgroup label="Cartões">${db.cartoes.filter(c=>c.ativo).sort(cmpName).map(c=>`<option ${selConta===c.nome?'selected':''}>${esc(c.nome)}</option>`).join('')}</optgroup></select></div>
       <div class="fg" id="fg-conta-ori" style="${isTr?'':'display:none'}"><label>Conta Origem *</label><select id="f-cn-ori">${contasOpts(l&&isTr&&l.transfer_out?l.conta:l&&isTr&&!l.transfer_out?l.transfer_partner:dp?.ori||null)}</select></div>
       <div class="fg" id="fg-conta-dst" style="${isTr?'':'display:none'}"><label>Conta Destino *</label><select id="f-cn-dst">${contasOpts(l&&isTr&&!l.transfer_out?l.conta:l&&isTr&&l.transfer_out?l.transfer_partner:dp?.dst||null)}</select></div>
@@ -1160,8 +1216,7 @@ function lancTipoChange(v){
   if(cat)cat.style.display=isTr?'none':'';
   if(catSel&&!isTr){
     const tf=v==='R'||v==='Res'?'R':v==='D'||v==='I'?'D':null;
-    const cur=catSel.value;
-    catSel.innerHTML=(tf?sortedCats(tf):sortedCats()).map(c=>`<option value="${c.id}"${String(c.id)===String(cur)?' selected':''}>${esc(catLabel(c))}</option>`).join('');
+    catComboSetTipo('f-ct',tf);
   }
 }
 function saveLanc(eid,andNew){
@@ -1200,7 +1255,7 @@ function saveLanc(eid,andNew){
     openLancModal(0,true);
   } else {_lastLancParams=null;pLanc();}
 }
-function togglePagoLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.origem==='provisao_fatura'){alert('O status da fatura é controlado pelo pagamento. Use o botão "Pagar" ou "Estornar".');return}l.pago=l.pago===false;syncFixoFromLanc(l);if(l.origem==='parcelado'&&l.ref_id){const p=db.parcelados.find(x=>x.id===l.ref_id);if(p)rebuildParcelStatusFromLaunch(p)}save();pLanc()}
+function togglePagoLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.origem==='provisao_fatura'){alert('O status da fatura é controlado pelo pagamento. Use o botão "Pagar" ou "Estornar".');return}l.pago=l.pago===false;syncFixoFromLanc(l);if(l.origem==='parcelado'&&l.ref_id){const p=db.parcelados.find(x=>x.id===l.ref_id);if(p)rebuildParcelStatusFromLaunch(p)}save();go(page)}
 function delLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.origem==='provisao_fatura'){alert('A provisão de fatura é gerada automaticamente. Para removê-la, estorne o pagamento ou exclua as compras da fatura.');return}if(l.transfer_grupo){if(!confirm('Este lançamento é uma transferência. Excluir os dois registros (débito e crédito)?'))return;db.lancamentos=db.lancamentos.filter(x=>x.transfer_grupo!==l.transfer_grupo);}else{if(!confirm('Excluir lançamento?'))return;db.lancamentos=db.lancamentos.filter(x=>x.id!==id);}save();pLanc()}
 function fv(id){return document.getElementById(id)?.value||''}
 
@@ -1406,28 +1461,145 @@ function pParc(){db.parcelados.forEach(p=>rebuildParcelStatusFromLaunch(p));cons
   <div class="tip tip-blue" style="margin:12px 18px 0">Ao salvar uma compra parcelada, todas as parcelas são criadas automaticamente em Lançamentos nas datas informadas, com controle individual de pago/pendente.</div>
   <div class="tbl-wrap">${sortableTable('parcelados',['Descrição / Próx. Parcelas','Cartão/Conta','Primeira parcela','Total','Parcelas','Progresso','Parc/Mês','Restante','Status',''],rows)}</div></div>`)
 }
-function openParcModal(eid){const p=eid?db.parcelados.find(x=>x.id===eid):null;showM(p?'Editar Parcelado':'Nova Compra Parcelada',`<div class="fgrid"><div class="fg full"><label>Descrição *</label><input type="text" id="p-ds" value="${esc(p?p.desc:'')}" placeholder="Ex: Geladeira, Notebook..."></div><div class="fg"><label>Categoria</label><select id="p-ct">${sortedCats('D').map(c=>`<option value="${c.id}" ${p&&p.cat_id===c.id?'selected':''}>${esc(catLabel(c))}</option>`).join('')}</select></div><div class="fg"><label>Cartão / Conta</label><select id="p-cn">${contaNomes().map(n=>`<option ${p&&p.conta===n?'selected':''}>${esc(n)}</option>`).join('')}</select></div><div class="fg"><label>Data da Compra</label><input type="date" id="p-dt" value="${p?p.data:new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Data da 1ª Parcela</label><input type="date" id="p-pr" value="${p?(p.primeira_data||p.data):new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Valor Total (R$) *</label><input type="number" id="p-vt" step="0.01" value="${p?p.total:''}" placeholder="0,00"></div><div class="fg"><label>Nº de Parcelas *</label><input type="number" id="p-np" min="1" value="${p?p.np:''}" placeholder="Ex: 12"></div><div class="fg"><label>Parcelas já pagas</label><input type="number" id="p-pg" min="0" value="${p?p.pg:0}"></div><div class="fg full"><label>Observação</label><input type="text" id="p-ob" value="${esc(p?p.obs:'')}" placeholder="Opcional"></div></div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveParc(${eid||0},true)">${p?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveParc(${eid||0})">${p?'Salvar':'Adicionar'}</button>`)}
+function openParcModal(eid){const p=eid?db.parcelados.find(x=>x.id===eid):null;showM(p?'Editar Parcelado':'Nova Compra Parcelada',`<div class="fgrid"><div class="fg full"><label>Descrição *</label><input type="text" id="p-ds" value="${esc(p?p.desc:'')}" placeholder="Ex: Geladeira, Notebook..."></div><div class="fg"><label>Categoria</label>${catComboHTML('p-ct','D',p?p.cat_id:null)}</div><div class="fg"><label>Cartão / Conta</label><select id="p-cn">${contaNomes().map(n=>`<option ${p&&p.conta===n?'selected':''}>${esc(n)}</option>`).join('')}</select></div><div class="fg"><label>Data da Compra</label><input type="date" id="p-dt" value="${p?p.data:new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Data da 1ª Parcela</label><input type="date" id="p-pr" value="${p?(p.primeira_data||p.data):new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Valor Total (R$) *</label><input type="number" id="p-vt" step="0.01" value="${p?p.total:''}" placeholder="0,00"></div><div class="fg"><label>Nº de Parcelas *</label><input type="number" id="p-np" min="1" value="${p?p.np:''}" placeholder="Ex: 12"></div><div class="fg"><label>Parcelas já pagas</label><input type="number" id="p-pg" min="0" value="${p?p.pg:0}"></div><div class="fg full"><label>Observação</label><input type="text" id="p-ob" value="${esc(p?p.obs:'')}" placeholder="Opcional"></div></div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveParc(${eid||0},true)">${p?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveParc(${eid||0})">${p?'Salvar':'Adicionar'}</button>`)}
 function saveParc(eid,andNew){const ds=fv('p-ds').trim(),ct=parseInt(fv('p-ct')),cn=fv('p-cn'),dt=fv('p-dt'),pr=fv('p-pr')||dt,vt=parseFloat(fv('p-vt')),np=parseInt(fv('p-np')),pg=Math.min(parseInt(fv('p-pg'))||0,np||0),ob=fv('p-ob');if(!ds||!vt||!np){alert('Preencha os campos obrigatórios.');return}let p;if(eid){const i=db.parcelados.findIndex(x=>x.id===eid);db.parcelados[i]={...db.parcelados[i],desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};p=db.parcelados[i]}else{p={id:nid(db.parcelados),desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};db.parcelados.push(p)}regenerateParcelLaunches(p);save();closeM();if(andNew)openParcModal();else pParc()}
 function delParc(id){if(!confirm('Excluir compra parcelada e suas parcelas lançadas?'))return;db.parcelados=db.parcelados.filter(p=>p.id!==id);db.lancamentos=db.lancamentos.filter(l=>!(l.origem==='parcelado'&&l.ref_id===id));save();pParc()}
 
 // ── DESPESAS FIXAS ──────────────────────────────────────────────────
-function pFixos(){const meses=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'],yy=new Date().getFullYear(),mm=new Date().getMonth(),mk=`${yy}-${String(mm+1).padStart(2,'0')}`;ensureFixedLaunchesForMonth(mk);const total=db.fixos.filter(f=>f.ativo).reduce((s,f)=>s+f.valor,0),pago=db.fixos.filter(f=>f.ativo&&f.meses&&f.meses[mk]==='pago').reduce((s,f)=>s+f.valor,0);
-  const rows=[...db.fixos].sort(cmpName).map(f=>{const mCols=meses.map((m,i)=>{const k=`${yy}-${String(i+1).padStart(2,'0')}`,s=f.meses&&f.meses[k];return`<td style="text-align:center"><span class="tag ${s==='pago'?'tag-g':s==='cancelado'?'tag-x':'tag-a'}" style="cursor:pointer;font-size:10px" onclick="toggleFixoMes(${f.id},'${k}')">${s==='pago'?'Pago':s==='cancelado'?'Canc.':'Pend.'}</span></td>`}).join('');
+let _fixosMes=new Date().toISOString().slice(0,7);
+let _fixosView='mes';
+let _fixosAno=new Date().getFullYear();
+
+function pFixos(){
+  if(_fixosView==='ano'){pFixosAno();return;}
+  const mk=_fixosMes;
+  ensureFixedLaunchesForMonth(mk);
+  const [y,m]=mk.split('-').map(Number);
+  const prevMk=m===1?`${y-1}-12`:`${y}-${String(m-1).padStart(2,'0')}`;
+  const nextMk=m===12?`${y+1}-01`:`${y}-${String(m+1).padStart(2,'0')}`;
+  const mesNome=new Date(y,m-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
+  const hoje=new Date().toISOString().slice(0,10);
+
+  // Agrupa por fixo: só os que se aplicam a este mês (têm lançamento ou foram pulados)
+  const items=db.fixos.filter(f=>f.ativo).map(f=>{
+    const ls=db.lancamentos.filter(l=>l.origem==='fixo'&&l.ref_id===f.id&&ym(l.data)===mk);
+    const st=f.meses&&f.meses[mk];
+    if(!ls.length&&st!=='cancelado')return null;
+    const tot=ls.reduce((s,l)=>s+Number(l.valor||0),0);
+    const pagos=ls.filter(l=>l.pago!==false).length;
+    const status=st==='cancelado'?'cancelado':ls.length&&pagos===ls.length?'pago':pagos>0?'parcial':'pendente';
+    return {f,ls,tot,pagos,status};
+  }).filter(Boolean);
+  const ordem={pendente:0,parcial:1,pago:2,cancelado:3};
+  items.sort((a,b)=>ordem[a.status]-ordem[b.status]||String(a.f.desc).localeCompare(String(b.f.desc),'pt-BR',{sensitivity:'base'}));
+
+  const previsto=items.filter(it=>it.status!=='cancelado').reduce((s,it)=>s+it.tot,0);
+  const pago=items.reduce((s,it)=>s+it.ls.filter(l=>l.pago!==false).reduce((a,l)=>a+Number(l.valor||0),0),0);
+  const nPend=items.filter(it=>it.status==='pendente'||it.status==='parcial').length;
+
+  const rows=items.map(it=>{
+    const f=it.f;
     const fqLabel=FREQ_LABEL[f.frequencia||'mensal']||'Mensal';
-    const inicioInfo=f.data_inicio?`${fdt(f.data_inicio)}<br><span style="color:var(--ink3)">${fqLabel}</span>`:fqLabel;
     const vCls=f.tipo==='R'?'v-pos':f.tipo==='Tr'?'v-neu':'v-neg';
-    return{sort:[f.desc,f.conta,f.data_inicio||'',f.valor,...meses.map((_,i)=>f.meses?.[`${yy}-${String(i+1).padStart(2,'0')}`]||''),''],cells:[`<td><strong>${esc(f.desc)}</strong><br><span class="txt-xs">${tipoTag(f.tipo||'D')} ${esc(catLabel(catById(f.cat_id)))}</span></td>`,`<td>${esc(f.conta)}${f.tipo==='Tr'&&f.conta_destino?`<br><span class="txt-xs" style="color:var(--ink3)">→ ${esc(f.conta_destino)}</span>`:''}</td>`,`<td class="txt-xs" style="text-align:center;white-space:nowrap">${inicioInfo}</td>`,`<td class="${vCls}">${R(f.valor)}</td>`,mCols,`<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openFixoModal(${f.id})">✏️</button><button class="ico-btn" onclick="toggleFixoAtivo(${f.id})">${f.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delFixo(${f.id})">🗑</button></div></td>`]};
+    const datasTxt=it.ls.length>1
+      ?`${it.ls.length} ocorrências (${it.pagos} pagas)`
+      :it.ls.length===1?fdt(it.ls[0].data):'—';
+    const atrasado=it.status!=='pago'&&it.status!=='cancelado'&&it.ls.some(l=>l.pago===false&&l.data<hoje);
+    const stTag=it.status==='pago'?'<span class="tag tag-g">✓ Pago</span>'
+      :it.status==='cancelado'?'<span class="tag tag-x">Pulado</span>'
+      :it.status==='parcial'?`<span class="tag tag-a">◐ Parcial (${it.pagos}/${it.ls.length})</span>`
+      :atrasado?'<span class="tag tag-r">⚠ Atrasado</span>':'<span class="tag tag-a">Pendente</span>';
+    const acaoPrincipal=it.status==='cancelado'
+      ?`<button class="btn btn-xs btn-ghost" onclick="setFixoMesStatus(${f.id},'${mk}','pendente')">Reativar</button>`
+      :it.status==='pago'
+      ?`<button class="btn btn-xs btn-ghost" onclick="setFixoMesStatus(${f.id},'${mk}','pendente')">↩ Reabrir</button>`
+      :`<button class="btn btn-xs btn-green" onclick="setFixoMesStatus(${f.id},'${mk}','pago')">✓ Dar baixa</button>`;
+    const acaoPular=(it.status==='pendente'||it.status==='parcial')
+      ?`<button class="btn btn-xs btn-ghost" title="Pular este mês (não cobra)" onclick="setFixoMesStatus(${f.id},'${mk}','cancelado')">Pular</button>`:'';
+    return{sort:[ordem[it.status],f.desc,f.conta,it.tot,''],cells:[
+      `<td><strong>${esc(f.desc)}</strong><br><span class="txt-xs" style="color:var(--ink3)">${tipoTag(f.tipo||'D')} ${esc(catLabel(catById(f.cat_id)))} · ${fqLabel}</span></td>`,
+      `<td>${esc(f.conta)}${f.tipo==='Tr'&&f.conta_destino?`<br><span class="txt-xs" style="color:var(--ink3)">→ ${esc(f.conta_destino)}</span>`:''}</td>`,
+      `<td class="txt-xs" style="white-space:nowrap">${datasTxt}</td>`,
+      `<td class="${vCls}">${R(it.tot||f.valor)}</td>`,
+      `<td>${stTag}</td>`,
+      `<td><div style="display:flex;gap:3px;align-items:center">${acaoPrincipal}${acaoPular}<button class="ico-btn" onclick="openFixoModal(${f.id})">✏️</button><button class="ico-btn" onclick="delFixo(${f.id})">🗑</button></div></td>`
+    ]};
   });
-  set(`<div class="kpi-row" style="grid-template-columns:repeat(4,1fr)"><div class="kpi c-t"><div class="kpi-lbl">Total Mensal</div><div class="kpi-val">${R(total)}</div></div><div class="kpi c-g"><div class="kpi-lbl">Pago (${meses[mm]})</div><div class="kpi-val">${R(pago)}</div></div><div class="kpi c-r"><div class="kpi-lbl">Pendente (${meses[mm]})</div><div class="kpi-val">${R(total-pago)}</div></div><div class="kpi c-b"><div class="kpi-lbl">Itens ativos</div><div class="kpi-val">${db.fixos.filter(f=>f.ativo).length}</div></div></div>
-  <div class="card"><div class="card-head"><h3>Lançamentos Fixos & Recorrentes</h3><button class="btn btn-green btn-sm" onclick="openFixoModal()">+ Nova</button></div>
-  <div class="tip tip-blue" style="margin:12px 18px 0">Os lançamentos fixos aparecem automaticamente em Lançamentos. O status Pago/Pendente pode ser controlado tanto aqui quanto na tela de Lançamentos.</div>
-  <div class="tbl-wrap" style="margin-top:12px">${sortableTable('fixos',['Descrição','Conta','Dia','R$/Mês',...meses,''],rows)}</div></div>`)
+
+  const inativos=db.fixos.filter(f=>!f.ativo);
+
+  set(`
+  <div class="sticky-bar">
+    <div style="display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <button onclick="_fixosMes='${prevMk}';pFixos()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)" title="Mês anterior">‹</button>
+      <span style="padding:7px 16px;font-size:13px;font-weight:700;min-width:150px;text-align:center;border-left:1px solid var(--line);border-right:1px solid var(--line)">${mesNome.charAt(0).toUpperCase()+mesNome.slice(1)}</span>
+      <button onclick="_fixosMes='${nextMk}';pFixos()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)" title="Próximo mês">›</button>
+    </div>
+    ${mk!==new Date().toISOString().slice(0,7)?`<button class="btn btn-ghost btn-sm" onclick="_fixosMes=new Date().toISOString().slice(0,7);pFixos()">Hoje</button>`:''}
+    <span class="txt-xs" style="color:var(--ink3)">${nPend?`<strong style="color:var(--amber)">${nPend} pendente(s)</strong> — ${R(previsto-pago)}`:'✓ Tudo baixado neste mês'}</span>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="_fixosView='ano';_fixosAno=${y};pFixos()">📅 Visão anual</button>
+      <button class="btn btn-green btn-sm" onclick="openFixoModal()">+ Novo</button>
+    </div>
+  </div>
+  <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
+    <div class="kpi c-t"><div class="kpi-lbl">Previsto no mês</div><div class="kpi-val">${R(previsto)}</div></div>
+    <div class="kpi c-g"><div class="kpi-lbl">Baixado</div><div class="kpi-val">${R(pago)}</div></div>
+    <div class="kpi c-r"><div class="kpi-lbl">Pendente</div><div class="kpi-val">${R(previsto-pago)}</div></div>
+    <div class="kpi c-b"><div class="kpi-lbl">Itens no mês</div><div class="kpi-val">${items.filter(it=>it.status!=='cancelado').length}</div></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h3>Fixos de ${mesNome}</h3><span class="txt-xs" style="color:var(--ink3)">pendentes primeiro · a baixa marca como pago em Lançamentos${db.cartoes.length?' e efetiva no limite do cartão':''}</span></div>
+    <div class="tbl-wrap">${sortableTable('fixosmes',['Descrição','Conta','Ocorrência','Valor','Status',''],rows,'Nenhum lançamento fixo neste mês')}</div>
+  </div>
+  ${inativos.length?`<div class="card" style="margin-top:16px"><div class="card-head"><h3>Pausados (${inativos.length})</h3></div><div class="card-body" style="display:flex;gap:8px;flex-wrap:wrap">${inativos.map(f=>`<span class="tag tag-x">${esc(f.desc)} · ${R(f.valor)} <button class="btn btn-xs btn-ghost" style="margin-left:4px" onclick="toggleFixoAtivo(${f.id})">▶ Reativar</button></span>`).join('')}</div></div>`:''}`)
 }
-function toggleFixoMes(id,k){const f=db.fixos.find(x=>x.id===id);if(!f)return;if(!f.meses)f.meses={};const c=f.meses[k];f.meses[k]=c==='pago'?'cancelado':c==='cancelado'?undefined:'pago';if(!f.meses[k])delete f.meses[k];ensureFixedLaunchesForMonth(k);const l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===id&&ym(x.data)===k);if(l)l.pago=f.meses[k]==='pago';save();pFixos()}
+
+// Visão anual (grade Jan–Dez) — secundária
+function pFixosAno(){
+  const meses=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'],yy=_fixosAno;
+  const rows=[...db.fixos].filter(f=>f.ativo).sort((a,b)=>String(a.desc).localeCompare(String(b.desc),'pt-BR',{sensitivity:'base'})).map(f=>{
+    const mCols=meses.map((m,i)=>{const k=`${yy}-${String(i+1).padStart(2,'0')}`,s=f.meses&&f.meses[k];return`<td style="text-align:center"><span class="tag ${s==='pago'?'tag-g':s==='cancelado'?'tag-x':'tag-a'}" style="cursor:pointer;font-size:10px" onclick="cycleFixoMes(${f.id},'${k}')">${s==='pago'?'Pago':s==='cancelado'?'—':'Pend.'}</span></td>`}).join('');
+    const vCls=f.tipo==='R'?'v-pos':f.tipo==='Tr'?'v-neu':'v-neg';
+    return{sort:[f.desc,f.valor,...meses.map((_,i)=>f.meses?.[`${yy}-${String(i+1).padStart(2,'0')}`]||''),''],cells:[
+      `<td><strong>${esc(f.desc)}</strong><br><span class="txt-xs" style="color:var(--ink3)">${esc(f.conta)} · ${FREQ_LABEL[f.frequencia||'mensal']||'Mensal'}</span></td>`,
+      `<td class="${vCls}" style="white-space:nowrap">${R(f.valor)}</td>`,mCols,
+      `<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openFixoModal(${f.id})">✏️</button><button class="ico-btn" onclick="toggleFixoAtivo(${f.id})">⏸</button></div></td>`]};
+  });
+  set(`
+  <div class="sticky-bar">
+    <div style="display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <button onclick="_fixosAno--;pFixos()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)">‹</button>
+      <span style="padding:7px 16px;font-size:13px;font-weight:700;min-width:80px;text-align:center;border-left:1px solid var(--line);border-right:1px solid var(--line)">${yy}</span>
+      <button onclick="_fixosAno++;pFixos()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)">›</button>
+    </div>
+    <span class="txt-xs" style="color:var(--ink3)">Clique no status para alternar: Pendente → Pago → Pulado</span>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="btn btn-dark btn-sm" onclick="_fixosView='mes';pFixos()">← Visão mensal</button>
+      <button class="btn btn-green btn-sm" onclick="openFixoModal()">+ Novo</button>
+    </div>
+  </div>
+  <div class="card"><div class="tbl-wrap">${sortableTable('fixos',['Descrição','Valor',...meses,''],rows,'Nenhum lançamento fixo ativo')}</div></div>`)
+}
+
+// Define o status do fixo em um mês, mantendo os lançamentos coerentes
+function setFixoMesStatus(id,k,status){
+  const f=db.fixos.find(x=>x.id===id);if(!f)return;
+  if(!f.meses)f.meses={};
+  if(status==='pendente')delete f.meses[k];else f.meses[k]=status;
+  if(status==='cancelado'){
+    // remove pendências do mês (não será cobrado); pagos são preservados
+    db.lancamentos=db.lancamentos.filter(l=>!(l.origem==='fixo'&&l.ref_id===id&&ym(l.data)===k&&l.pago===false));
+  } else {
+    ensureFixedLaunchesForMonth(k); // recria se necessário (ex.: reativação)
+    db.lancamentos.filter(l=>l.origem==='fixo'&&l.ref_id===id&&ym(l.data)===k).forEach(l=>{l.pago=status==='pago'});
+  }
+  save();go(page);
+}
+function cycleFixoMes(id,k){const f=db.fixos.find(x=>x.id===id);const c=f&&f.meses?f.meses[k]:null;setFixoMesStatus(id,k,c==='pago'?'cancelado':c==='cancelado'?'pendente':'pago');}
 function fixoTipoChange(){
   const tp=fv('x-tp');
-  const ct=document.getElementById('x-ct');
-  if(ct){ct.innerHTML=tp==='Tr'?'':sortedCats(tp).map(c=>`<option value="${c.id}">${esc(catLabel(c))}</option>`).join('');}
+  if(tp!=='Tr')catComboSetTipo('x-ct',tp);
   const fgCt=document.getElementById('fg-x-ct');if(fgCt)fgCt.style.display=tp==='Tr'?'none':'';
   const fgCd=document.getElementById('fg-x-cd');if(fgCd)fgCd.style.display=tp==='Tr'?'':'none';
 }
@@ -1464,7 +1636,6 @@ function openFixoModal(eid){
   const diLabel=fq==='diario'?'Data de início':fq==='semanal'||fq==='quinzenal'?'Data de início do ciclo':'Data da 1ª cobrança';
   // Data padrão: usa data_inicio existente, ou hoje
   const dataDefault=f?f.data_inicio:new Date().toISOString().slice(0,10);
-  const catOpts=sortedCats(tp==='Tr'?null:tp).map(c=>`<option value="${c.id}" ${f&&f.cat_id===c.id?'selected':''}>${esc(catLabel(c))}</option>`).join('');
   const contaOpts=contaNomes().map(n=>`<option ${f&&f.conta===n?'selected':''}>${esc(n)}</option>`).join('');
   const contaDestOpts=contaNomes().map(n=>`<option ${f&&f.conta_destino===n?'selected':''}>${esc(n)}</option>`).join('');
   showM(f?'Editar Lançamento Fixo':'Novo Lançamento Fixo','modal-lg',`<div class="fgrid">
@@ -1472,7 +1643,7 @@ function openFixoModal(eid){
     <div class="fg"><label>Tipo *</label><select id="x-tp" onchange="fixoTipoChange()"><option value="D"${tp==='D'?' selected':''}>💸 Despesa</option><option value="R"${tp==='R'?' selected':''}>💰 Receita</option><option value="Tr"${tp==='Tr'?' selected':''}>🔄 Transferência</option></select></div>
     <div class="fg"><label>Frequência *</label><select id="x-fq" onchange="fixoFreqChange(this.value)">${freqOpts.map(o=>`<option value="${o}"${fq===o?' selected':''}>${FREQ_LABEL[o]}</option>`).join('')}</select></div>
     <div class="fg"><label id="x-di-lbl">${diLabel} *</label><input type="date" id="x-di" value="${dataDefault}" onchange="fixoCartaoPreview()"></div>
-    <div class="fg" id="fg-x-ct"${tp==='Tr'?' style="display:none"':''}><label>Categoria</label><select id="x-ct">${catOpts}</select></div>
+    <div class="fg" id="fg-x-ct"${tp==='Tr'?' style="display:none"':''}><label>Categoria</label>${catComboHTML('x-ct',tp==='Tr'?null:tp,f?f.cat_id:null)}</div>
     <div class="fg"><label>Conta / Cartão</label><select id="x-cn" onchange="fixoCartaoPreview()">${contaOpts}</select></div>
     <div class="fg" id="fg-x-cd"${tp!=='Tr'?' style="display:none"':''}><label>Conta Destino *</label><select id="x-cd">${contaDestOpts}</select></div>
     <div class="fg"><label>Valor por ocorrência (R$) *</label><input type="number" id="x-vl" step="0.01" value="${f?f.valor:''}" placeholder="0,00" oninput="fixoCartaoPreview()"></div>
@@ -1534,7 +1705,7 @@ function pCartoes(){const cards=sortedCartoes();
         <div style="display:flex;flex-direction:column;gap:8px">
           <div><span style="font-weight:600">Limite</span><br>Limite total cadastrado no cartão.</div>
           <div><span style="font-weight:600">Fatura atual</span><br>Total da fatura do ciclo corrente (a que fecha neste mês).</div>
-          <div><span style="font-weight:600">Limite utilizado</span><br>Soma de <strong>todas</strong> as compras cujas faturas ainda não foram pagas — pode incluir faturas anteriores e compras que só entram nas próximas. Ao pagar uma fatura, as compras dela saem deste valor.</div>
+          <div><span style="font-weight:600">Limite utilizado</span><br>Soma de <strong>todas</strong> as compras cujas faturas ainda não foram pagas — pode incluir faturas anteriores e compras que só entram nas próximas. Lançamentos <strong>fixos pendentes</strong> não consomem limite (só após a baixa). Ao pagar uma fatura, as compras dela saem deste valor.</div>
           <div><span style="font-weight:600">Limite disponível</span><br>Limite total − Limite utilizado.</div>
         </div>
       </div>
