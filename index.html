@@ -250,7 +250,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.2 ☁</span>
+    <span>v3.3 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -359,7 +359,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 
 <script>
 // ════════════════════════════════════════════════════════════════════
-// FINCONTROL v3.1 — Firebase Edition
+// FINCONTROL v3.3 — Firebase Edition
+// v3.3: gestão de faturas refeita — cálculo unificado (faturaMesCompra é a
+// fonte única de verdade), fim da duplicação fatura/provisão em Lançamentos,
+// pagamento parcial com saldo rolado, telas Cartões/Faturas clarificadas.
 // ════════════════════════════════════════════════════════════════════
 const DB_DOC = 'shared/fincontrol'; // caminho único compartilhado no Firestore
 const ALLOWED_EMAILS = ['thiagoacsampaio@gmail.com', 'casorio.et@gmail.com']; // lista de e-mails com acesso permitido
@@ -482,34 +485,33 @@ function signedValue(l){if(l.tipo==='Tr'){return l.transfer_out?-Number(l.valor|
 function lancEfetivo(l, considerarPendentes=false){return considerarPendentes || l.pago!==false}
 function saldoConta(nome, ate=null, considerarPendentes=false){const c=db.contas.find(x=>x.nome===nome); const base=c?Number(c.saldo_ini||0):0;if(!c)return 0;return base+db.lancamentos.filter(l=>l.conta===nome && (!ate||l.data<=ate) && lancEfetivo(l,considerarPendentes)).reduce((s,l)=>s+signedValue(l),0)}
 function saldoContaDia(nome,data){return saldoConta(nome,data,false)}
-function gastoCartao(nome){return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D').reduce((s,l)=>s+Number(l.valor||0),0)}
-// Mês-fatura (YYYY-MM, base no fechamento) ao qual uma compra pertence
+// ════════════════════════════════════════════════════════════════════
+// FATURA — FONTE ÚNICA DE VERDADE
+// Chave interna da fatura: YYYY-MM do mês de FECHAMENTO.
+// Exibição ao usuário: sempre pelo mês/data de VENCIMENTO.
+// ════════════════════════════════════════════════════════════════════
+// Mês-fatura (YYYY-MM, base no fechamento) ao qual uma compra pertence.
+// Comparação por dia — sem objetos Date, sem rollover em meses curtos.
 function faturaMesCompra(c,dataStr){const p=String(dataStr).split('-');const y=+p[0],m=+p[1],day=+p[2];let fy=y,fm=m;if(day>c.fechamento){fm++;if(fm>12){fm=1;fy++;}}return `${fy}-${String(fm).padStart(2,'0')}`;}
-// Fatura em aberto = compras cujo mês-fatura ainda NÃO foi pago (= limite utilizado)
+// Limite utilizado = compras (e resíduos) cujo mês-fatura ainda NÃO foi pago
 function faturaAberta(nome){const c=db.cartoes.find(x=>x.nome===nome);if(!c)return 0;return db.lancamentos.filter(l=>l.conta===nome&&l.tipo==='D'&&!db.faturas_pagas.some(fp=>fp.cartao_id===c.id&&fp.mes===faturaMesCompra(c,l.data))).reduce((s,l)=>s+Number(l.valor||0),0);}
+// Total da fatura de um mês específico (chave = mês de fechamento)
+function faturaTotalMes(cartaoId,mes){return getFaturaTransacoes(cartaoId,mes).reduce((s,l)=>s+Number(l.valor||0),0);}
+// Rótulo de exibição da fatura: mês/ano do VENCIMENTO
+function faturaLabelMes(cartaoId,mes){const d=getFaturaVencimento(cartaoId,mes);if(!d)return mes;const [y,m]=d.vencimento.split('-').map(Number);const s=new Date(y,m-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});return s.charAt(0).toUpperCase()+s.slice(1);}
 function tipoTag(t){if(t==='R') return '<span class="tag tag-g">Receita</span>'; if(t==='D') return '<span class="tag tag-r">Despesa</span>'; if(t==='I') return '<span class="tag tag-b">Investimento</span>'; if(t==='Res') return '<span class="tag tag-t">Resgate</span>'; if(t==='Tr') return '<span class="tag tag-x">Transferência</span>'; return '<span class="tag tag-x">'+esc(t)+'</span>'}
 function vClass(t,transfer_out){if(t==='Tr')return transfer_out?'v-neg':'v-pos';return isEntrada(t)?'v-pos':t==='I'?'v-neu':'v-neg'}
 function vSign(t,transfer_out){if(t==='Tr')return transfer_out?'-':'+';return isEntrada(t)?'+':t==='I'?'▸':'-'}
-function origemTag(l){if(l.origem==='fixo')return '<span class="tag tag-a txt-xs">fixo</span>'; if(l.origem==='parcelado')return '<span class="tag tag-p txt-xs">parcelado</span>'; if(l.origem==='provisao_fatura')return '<span class="tag tag-t txt-xs">💳 fatura</span>'; return l.importado?'<span class="tag tag-b txt-xs">importado</span>':'<span class="tag tag-x txt-xs">manual</span>'}
+function origemTag(l){if(l.origem==='fixo')return '<span class="tag tag-a txt-xs">fixo</span>'; if(l.origem==='parcelado')return '<span class="tag tag-p txt-xs">parcelado</span>'; if(l.origem==='provisao_fatura')return '<span class="tag tag-t txt-xs">💳 fatura</span>'; if(l.origem==='residual_fatura')return '<span class="tag tag-a txt-xs">↪ saldo anterior</span>'; return l.importado?'<span class="tag tag-b txt-xs">importado</span>':'<span class="tag tag-x txt-xs">manual</span>'}
 
-// ── helper: detecta fatura do cartão para uma data de lançamento ──
+// ── fatura do cartão para uma data de lançamento (derivado do canônico) ──
 function faturaCartao(nomeCartao, dataLanc){
   const c=db.cartoes.find(x=>x.nome===nomeCartao);
   if(!c)return null;
-  const d=new Date(dataLanc+'T12:00');
-  const dia=d.getDate();
-  // Mês de fechamento da fatura (1-based)
-  let fY=d.getFullYear(), fM=d.getMonth()+1;
-  if(dia>c.fechamento){ fM++; if(fM>12){fM=1;fY++;} }
-  // Fechamento: dia c.fechamento do mês fM
-  const diaFech=String(Math.min(c.fechamento,new Date(fY,fM,0).getDate())).padStart(2,'0');
-  const fechamento=`${fY}-${String(fM).padStart(2,'0')}-${diaFech}`;
-  // Vencimento: se vencimento < fechamento (ex: fecha 26, paga 10) → mês seguinte ao fechamento
-  let vY=fY, vM=fM;
-  if(c.vencimento<c.fechamento){ vM++; if(vM>12){vM=1;vY++;} }
-  const diaVenc=String(Math.min(c.vencimento,new Date(vY,vM,0).getDate())).padStart(2,'0');
-  const vencimento=`${vY}-${String(vM).padStart(2,'0')}-${diaVenc}`;
-  return{cartao:c,vencimento,fechamento,cor:c.cor};
+  const mes=faturaMesCompra(c,dataLanc);
+  const datas=getFaturaVencimento(c.id,mes);
+  if(!datas)return null;
+  return{cartao:c,mes,vencimento:datas.vencimento,fechamento:datas.fechamento,cor:c.cor};
 }
 function faturaTag(l){
   if(!db.cartoes.find(x=>x.nome===l.conta))return '';
@@ -647,8 +649,10 @@ function ensureProvisaoFatura(cartaoId, mes){
   const catPag=db.categorias.find(x=>x.nome==='Outros (Despesa)')||db.categorias.find(x=>x.tipo==='D');
   const dataFinal=fp?fp.data_pagamento:(datas?datas.vencimento:new Date().toISOString().slice(0,10));
   const valorFinal=fp?fp.valor:total;
+  // Descrição padronizada pelo VENCIMENTO (identidade única da fatura na UI)
+  const descFinal=`Fatura ${c.nome} — venc. ${fdt(datas?datas.vencimento:dataFinal)}`;
   if(!prov){
-    db.lancamentos.push({id:nid(db.lancamentos),data:dataFinal,desc:`Fatura ${c.nome} ${mes}`,tipo:'D',cat_id:catPag?.id||null,conta:contaNome,valor:valorFinal,obs:`Pagamento fatura ${c.nome}`,importado:false,pago:!!fp,origem:'provisao_fatura',cartao_id:cartaoId,fatura_mes:mes});
+    db.lancamentos.push({id:nid(db.lancamentos),data:dataFinal,desc:descFinal,tipo:'D',cat_id:catPag?.id||null,conta:contaNome,valor:valorFinal,obs:`Pagamento fatura ${c.nome}`,importado:false,pago:!!fp,origem:'provisao_fatura',cartao_id:cartaoId,fatura_mes:mes});
     save();
   } else {
     let ch=false;
@@ -656,6 +660,7 @@ function ensureProvisaoFatura(cartaoId, mes){
     if(prov.pago!==!!fp){prov.pago=!!fp;ch=true;}
     if(prov.data!==dataFinal){prov.data=dataFinal;ch=true;}
     if(prov.conta!==contaNome){prov.conta=contaNome;ch=true;}
+    if(prov.desc!==descFinal){prov.desc=descFinal;ch=true;}
     if(ch)save();
   }
 }
@@ -688,32 +693,51 @@ function refreshLancResults(){
   const ini=lDtIni||(lFiltMes?lFiltMes+'-01':`${hoje.slice(0,7)}-01`);
   const fim=lDtFim||(lFiltMes?(lFiltMes+'-'+String(monthEnd(lFiltMes)).padStart(2,'0')):hoje);
   ensureFixedLaunchesBetween(ini,fim);
-  ensureProvisoesFaturas(ini,fim);
+  // -1 mês: fatura que fecha no mês anterior pode vencer dentro do período visualizado
+  ensureProvisoesFaturas(addMonths(ini,-1),fim);
   let list=[...db.lancamentos].filter(l=>!isCartaoPurchase(l)&&l.origem!=='pagamento_fatura');
   if(lFiltTipo)list=list.filter(l=>l.tipo===lFiltTipo);
   if(lFiltMes)list=list.filter(l=>l.data&&l.data.startsWith(lFiltMes));
   if(lDtIni)list=list.filter(l=>l.data>=lDtIni);
   if(lDtFim)list=list.filter(l=>l.data<=lDtFim);
-  if(lFiltConta)list=list.filter(l=>l.conta===lFiltConta);
+  if(lFiltConta)list=list.filter(l=>l.conta===lFiltConta||(l.origem==='provisao_fatura'&&db.cartoes.find(c=>c.id===l.cartao_id)?.nome===lFiltConta));
   if(lFiltCat)list=list.filter(l=>l.cat_id==lFiltCat);
   if(lPago)list=list.filter(l=>lPago==='pago'?l.pago!==false:l.pago===false);
   if(lSearch)list=list.filter(l=>String(l.desc).toLowerCase().includes(lSearch.toLowerCase()));
   list.sort((a,b)=>a.data<b.data?1:a.data>b.data?-1:0);
-  const fatSin=(!lFiltTipo||lFiltTipo==='D')?getFaturasSinteticas(ini,fim).filter(f=>{
-    if(lSearch&&!f.cartaoNome.toLowerCase().includes(lSearch.toLowerCase()))return false;
-    if(lPago==='pago'&&!f.fp)return false;
-    if(lPago==='pendente'&&f.fp)return false;
-    if(lFiltConta&&f.cartaoNome!==lFiltConta)return false;
-    return true;
-  }):[];
   const rec=list.filter(l=>l.tipo==='R').reduce((s,l)=>s+l.valor,0);
-  const dep=list.filter(l=>l.tipo==='D').reduce((s,l)=>s+l.valor,0)+fatSin.reduce((s,f)=>s+f.total,0);
+  const dep=list.filter(l=>l.tipo==='D').reduce((s,l)=>s+l.valor,0);
   const inv=list.filter(l=>l.tipo==='I').reduce((s,l)=>s+l.valor,0);
-  const pend=list.filter(l=>l.pago===false).reduce((s,l)=>s+l.valor,0)+fatSin.filter(f=>!f.fp).reduce((s,f)=>s+f.total,0);
+  const pend=list.filter(l=>l.pago===false&&l.tipo!=='Tr').reduce((s,l)=>s+l.valor,0);
+  const hoje2=new Date().toISOString().slice(0,10);
   const rows=list.map(l=>{
     const cat=catById(l.cat_id);
     const saldoDia=isContaBancaria(l.conta)?R(saldoContaDia(l.conta,l.data)):'—';
     const parcInfo=l.parcela_num?`<br><span class="txt-xs" style="color:var(--purple)">Parcela ${l.parcela_num}/${l.parcela_total}</span>`:'';
+    // Provisão de fatura: linha especial com ações Ver/Pagar/Estornar (única representação da fatura aqui)
+    if(l.origem==='provisao_fatura'&&l.cartao_id){
+      const cc=db.cartoes.find(c=>c.id===l.cartao_id);
+      const nTrans=cc?getFaturaTransacoes(l.cartao_id,l.fatura_mes).length:0;
+      const datas=cc?getFaturaVencimento(l.cartao_id,l.fatura_mes):null;
+      const pago=l.pago!==false;
+      const diasVenc=Math.ceil((new Date(l.data)-new Date(hoje2))/(1000*60*60*24));
+      const statusTag=pago?`<span class="tag tag-g">✓ Paga</span>`:diasVenc<0?`<span class="tag tag-r">⚠ Vencida</span>`:diasVenc<=5?`<span class="tag tag-a">⚡ Vence em ${diasVenc}d</span>`:`<span class="tag tag-x">Pendente</span>`;
+      const acoes=pago
+        ?`<div style="display:flex;gap:3px"><button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${l.cartao_id},'${l.fatura_mes}')">Ver</button><button class="btn btn-xs btn-ghost" onclick="estornarFatura(${l.cartao_id},'${l.fatura_mes}')">Estornar</button></div>`
+        :`<div style="display:flex;gap:3px"><button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${l.cartao_id},'${l.fatura_mes}')">Ver</button><button class="btn btn-xs btn-dark" onclick="openPagarFaturaModal(${l.cartao_id},'${l.fatura_mes}',${l.valor})">Pagar</button></div>`;
+      return{sort:[l.data,l.desc,'Fatura de cartão',l.conta,'D',l.valor,pago?1:0,saldoDia,'fatura',''],cells:[
+        `<td class="mono txt-xs">${fdt(l.data)}</td>`,
+        `<td><span style="display:inline-flex;align-items:center;gap:6px"><span class="dot" style="background:${cc?cc.cor:'#888'}"></span><strong>${esc(l.desc)}</strong></span><br><span class="txt-xs" style="color:var(--ink3)">${nTrans} item(ns)${datas?` · fecha ${fdt(datas.fechamento)}`:''}</span></td>`,
+        `<td><span class="tag tag-t txt-xs">💳 Fatura de cartão</span></td>`,
+        `<td>${esc(l.conta)}</td>`,
+        `<td>${tipoTag('D')}</td>`,
+        `<td class="v-neg">-${R(l.valor)}</td>`,
+        `<td>${statusTag}</td>`,
+        `<td class="mono txt-xs">${saldoDia}</td>`,
+        `<td>${origemTag(l)}</td>`,
+        `<td>${acoes}</td>`
+      ]};
+    }
     return{sort:[l.data,l.desc,catFullName(cat),l.conta,l.tipo,l.valor,l.pago!==false?1:0,saldoDia,l.origem||'manual',''],cells:[
       `<td class="mono txt-xs">${fdt(l.data)}</td>`,
       `<td>${esc(l.desc)}${parcInfo}</td>`,
@@ -727,28 +751,7 @@ function refreshLancResults(){
       `<td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>`
     ]};
   });
-  const fatRows=fatSin.map(f=>{
-    const pago=!!f.fp;
-    const hoje2=new Date().toISOString().slice(0,10);
-    const diasVenc=Math.ceil((new Date(f.vencimento)-new Date(hoje2))/(1000*60*60*24));
-    const urgente=!pago&&diasVenc>=0&&diasVenc<=5;
-    const vencida=!pago&&diasVenc<0;
-    const statusTag=pago?`<span class="tag tag-g">✓ Pago</span>`:urgente?`<span class="tag tag-a">⚡ Vence em ${diasVenc}d</span>`:vencida?`<span class="tag tag-r">⚠ Vencida</span>`:`<span class="tag tag-x">Pendente</span>`;
-    const acoes=pago?`<button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver fatura</button>`:`<div style="display:flex;gap:3px"><button class="btn btn-xs btn-ghost" onclick="openFaturaCartao(${f.cartaoId},'${f.mes}')">Ver</button><button class="btn btn-xs btn-dark" onclick="openPagarFaturaModal(${f.cartaoId},'${f.mes}',${f.total})">Pagar</button></div>`;
-    return{sort:[f.vencimento,`Fatura ${f.cartaoNome}`,'Cartão',f.cartaoNome,'D',f.total,pago?1:0,'—','fatura',''],cells:[
-      `<td class="mono txt-xs">${fdt(f.vencimento)}</td>`,
-      `<td><span style="display:inline-flex;align-items:center;gap:6px"><span class="dot" style="background:${f.cor}"></span><strong>Fatura ${esc(f.cartaoNome)}</strong></span><br><span class="txt-xs" style="color:var(--ink3)">${f.transacoes.length} compra(s) · fecha ${fdt(f.fechamento)}</span></td>`,
-      `<td><span class="tag tag-r" style="font-size:10px">💳 Cartão</span></td>`,
-      `<td>${esc(f.cartaoNome)}</td>`,
-      `<td><span class="tag tag-r">Despesa</span></td>`,
-      `<td class="v-neg">-${R(f.total)}</td>`,
-      `<td>${statusTag}</td>`,
-      `<td class="mono txt-xs">—</td>`,
-      `<td><span class="tag tag-p txt-xs">fatura</span></td>`,
-      `<td>${acoes}</td>`
-    ]};
-  });
-  const allRows=[...rows,...fatRows];
+  const allRows=rows;
   resultsEl.innerHTML=`
     <div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
       <div class="kpi c-g"><div class="kpi-lbl">Receitas</div><div class="kpi-val">${R(rec)}</div></div>
@@ -1057,27 +1060,6 @@ function isCartaoPurchase(l){
   return !!db.cartoes.find(c=>c.nome===l.conta) && l.tipo==='D' && l.origem!=='pagamento_fatura';
 }
 
-// Retorna linhas sintéticas de fatura para o período ini-fim
-function getFaturasSinteticas(ini, fim){
-  const rows=[];
-  db.cartoes.filter(c=>c.ativo).forEach(c=>{
-    // Verifica os últimos 18 meses para cobrir qualquer período
-    for(let i=17;i>=-2;i--){
-      const d=new Date();d.setDate(1);d.setMonth(d.getMonth()-i);
-      const mes=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-      const datas=getFaturaVencimento(c.id,mes);
-      if(!datas)continue;
-      if(datas.vencimento<ini||datas.vencimento>fim)continue;
-      const transacoes=getFaturaTransacoes(c.id,mes);
-      const total=transacoes.reduce((s,l)=>s+Number(l.valor||0),0);
-      if(total===0)continue;
-      const fp=db.faturas_pagas.find(x=>x.cartao_id===c.id&&x.mes===mes);
-      rows.push({cartaoId:c.id,cartaoNome:c.nome,cor:c.cor,mes,total,fp,vencimento:datas.vencimento,fechamento:datas.fechamento,transacoes});
-    }
-  });
-  return rows;
-}
-
 function pLanc(){
   const hoje=new Date().toISOString().slice(0,10);
   const ini=lDtIni||(lFiltMes?lFiltMes+'-01':`${hoje.slice(0,7)}-01`);
@@ -1218,8 +1200,8 @@ function saveLanc(eid,andNew){
     openLancModal(0,true);
   } else {_lastLancParams=null;pLanc();}
 }
-function togglePagoLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;l.pago=l.pago===false;syncFixoFromLanc(l);if(l.origem==='parcelado'&&l.ref_id){const p=db.parcelados.find(x=>x.id===l.ref_id);if(p)rebuildParcelStatusFromLaunch(p)}save();pLanc()}
-function delLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.transfer_grupo){if(!confirm('Este lançamento é uma transferência. Excluir os dois registros (débito e crédito)?'))return;db.lancamentos=db.lancamentos.filter(x=>x.transfer_grupo!==l.transfer_grupo);}else{if(!confirm('Excluir lançamento?'))return;db.lancamentos=db.lancamentos.filter(x=>x.id!==id);}save();pLanc()}
+function togglePagoLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.origem==='provisao_fatura'){alert('O status da fatura é controlado pelo pagamento. Use o botão "Pagar" ou "Estornar".');return}l.pago=l.pago===false;syncFixoFromLanc(l);if(l.origem==='parcelado'&&l.ref_id){const p=db.parcelados.find(x=>x.id===l.ref_id);if(p)rebuildParcelStatusFromLaunch(p)}save();pLanc()}
+function delLanc(id){const l=db.lancamentos.find(x=>x.id===id);if(!l)return;if(l.origem==='provisao_fatura'){alert('A provisão de fatura é gerada automaticamente. Para removê-la, estorne o pagamento ou exclua as compras da fatura.');return}if(l.transfer_grupo){if(!confirm('Este lançamento é uma transferência. Excluir os dois registros (débito e crédito)?'))return;db.lancamentos=db.lancamentos.filter(x=>x.transfer_grupo!==l.transfer_grupo);}else{if(!confirm('Excluir lançamento?'))return;db.lancamentos=db.lancamentos.filter(x=>x.id!==id);}save();pLanc()}
 function fv(id){return document.getElementById(id)?.value||''}
 
 // ── IMPORTAR ─────────────────────────────────────────────────────────
@@ -1539,10 +1521,11 @@ function delConta(id){if(!confirm('Excluir conta? Os lançamentos não serão re
 
 // ── CARTÕES ──────────────────────────────────────────────────────────
 function pCartoes(){const cards=sortedCartoes();
-  const rows=cards.map(c=>{const g=faturaAberta(c.nome),cv=db.contas.find(x=>x.id===c.conta_id);
-    return{sort:[c.nome,c.bandeira,cv?cv.nome:'',c.fechamento,c.vencimento,c.limite,g,c.limite-g,''],cells:[`<td><span class="dot" style="background:${c.cor};margin-right:7px"></span><strong>${esc(c.nome)}</strong></td>`,`<td>${esc(c.bandeira)}</td>`,`<td>${esc(cv?cv.nome:'—')}</td>`,`<td class="mono txt-xs">Dia ${c.fechamento}</td>`,`<td class="mono txt-xs">Dia ${c.vencimento}</td>`,`<td class="mono txt-xs">${R(c.limite)}</td>`,`<td class="v-neg">${R(g)}</td>`,`<td class="${(c.limite-g)>=0?'v-pos':'v-neg'}">${R(c.limite-g)}</td>`,`<td><div style="display:flex;gap:3px"><button class="btn btn-ghost btn-xs" onclick="openFaturaCartao(${c.id},'${new Date().toISOString().slice(0,7)}')">Fatura</button><button class="ico-btn" onclick="openCartaoModal(${c.id})">✏️</button><button class="ico-btn" onclick="toggleCartaoAtivo(${c.id})">${c.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delCartao(${c.id})">🗑</button></div></td>`]};
+  const mk=new Date().toISOString().slice(0,7);
+  const rows=cards.map(c=>{const g=faturaAberta(c.nome),fAtual=faturaTotalMes(c.id,mk),cv=db.contas.find(x=>x.id===c.conta_id);
+    return{sort:[c.nome,c.bandeira,cv?cv.nome:'',c.fechamento,c.vencimento,c.limite,fAtual,g,c.limite-g,''],cells:[`<td><span class="dot" style="background:${c.cor};margin-right:7px"></span><strong>${esc(c.nome)}</strong></td>`,`<td>${esc(c.bandeira)}</td>`,`<td>${esc(cv?cv.nome:'—')}</td>`,`<td class="mono txt-xs">Dia ${c.fechamento}</td>`,`<td class="mono txt-xs">Dia ${c.vencimento}</td>`,`<td class="mono txt-xs">${R(c.limite)}</td>`,`<td class="v-neg">${R(fAtual)}</td>`,`<td class="v-neg">${R(g)}</td>`,`<td class="${(c.limite-g)>=0?'v-pos':'v-neg'}">${R(c.limite-g)}</td>`,`<td><div style="display:flex;gap:3px"><button class="btn btn-ghost btn-xs" onclick="openFaturaCartao(${c.id},'${mk}')">Fatura</button><button class="ico-btn" onclick="openCartaoModal(${c.id})">✏️</button><button class="ico-btn" onclick="toggleCartaoAtivo(${c.id})">${c.ativo?'⏸':'▶'}</button><button class="ico-btn" onclick="delCartao(${c.id})">🗑</button></div></td>`]};
   });
-  set(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">${cards.filter(c=>c.ativo).map(c=>{const g=faturaAberta(c.nome),pct=Math.min(100,g/c.limite*100);const mk=new Date().toISOString().slice(0,7);const fp=db.faturas_pagas.find(x=>x.cartao_id===c.id&&x.mes===mk);return`<div class="kpi" style="cursor:pointer" onclick="openFaturaCartao(${c.id},'${mk}')"><div class="kpi-lbl" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:4px"><span class="dot" style="background:${c.cor}"></span>${esc(c.nome)}</span>${fp?'<span class="tag tag-g" style="font-size:9px">✓ Paga</span>':'<span class="tag tag-a" style="font-size:9px">Aberta</span>'}</div><div class="kpi-val" style="color:var(--red)">${R(g)}</div><div class="kpi-sub">Limite ${R(c.limite)} · Disponível ${R(c.limite-g)}</div><div class="pbar" style="margin-top:8px"><div class="pfill" style="width:${pct}%;background:${pct>80?'#c9283e':pct>50?'#b45309':'#00875a'}"></div></div><div style="margin-top:6px;font-size:10px;color:var(--blue)">👁 Ver fatura completa</div></div>`}).join('')}</div>
+  set(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">${cards.filter(c=>c.ativo).map(c=>{const g=faturaAberta(c.nome),fAtual=faturaTotalMes(c.id,mk),pct=Math.min(100,g/c.limite*100);const fp=db.faturas_pagas.find(x=>x.cartao_id===c.id&&x.mes===mk);const parcial=fp&&fp.total!==undefined&&fp.valor<fp.total-0.005;return`<div class="kpi" style="cursor:pointer" onclick="openFaturaCartao(${c.id},'${mk}')"><div class="kpi-lbl" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:4px"><span class="dot" style="background:${c.cor}"></span>${esc(c.nome)}</span>${fp?(parcial?'<span class="tag tag-a" style="font-size:9px">◐ Parcial</span>':'<span class="tag tag-g" style="font-size:9px">✓ Paga</span>'):fAtual>0?'<span class="tag tag-a" style="font-size:9px">Aberta</span>':'<span class="tag tag-x" style="font-size:9px">Sem lançamentos</span>'}</div><div class="kpi-val" style="color:var(--red)">${R(fAtual)}</div><div class="kpi-sub">Fatura atual (${esc(faturaLabelMes(c.id,mk))})</div><div class="kpi-sub" style="margin-top:6px">Limite utilizado <strong>${R(g)}</strong> · Disponível <strong>${R(c.limite-g)}</strong></div><div class="pbar" style="margin-top:6px"><div class="pfill" style="width:${pct}%;background:${pct>80?'#c9283e':pct>50?'#b45309':'#00875a'}"></div></div><div style="margin-top:6px;font-size:10px;color:var(--blue)">👁 Ver fatura completa</div></div>`}).join('')}</div>
   <div class="card"><div class="card-head"><h3>Cartões</h3><div style="display:flex;align-items:center;gap:8px">
     <div class="hint-wrap" style="position:relative">
       <button class="ico-btn hint-btn" style="font-size:12px;width:22px;height:22px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center" onclick="this.nextElementSibling.classList.toggle('hidden')">ℹ</button>
@@ -1550,12 +1533,13 @@ function pCartoes(){const cards=sortedCartoes();
         <div style="font-weight:700;margin-bottom:8px;font-size:12px">Como ler estas colunas</div>
         <div style="display:flex;flex-direction:column;gap:8px">
           <div><span style="font-weight:600">Limite</span><br>Limite total cadastrado no cartão.</div>
-          <div><span style="font-weight:600">Fatura aberta</span><br>Soma das compras cujas faturas <strong>ainda não foram pagas</strong> (limite utilizado). Ao pagar a fatura, essas compras saem deste valor.</div>
-          <div><span style="font-weight:600">Limite disponível</span><br>Limite total − Fatura aberta.</div>
+          <div><span style="font-weight:600">Fatura atual</span><br>Total da fatura do ciclo corrente (a que fecha neste mês).</div>
+          <div><span style="font-weight:600">Limite utilizado</span><br>Soma de <strong>todas</strong> as compras cujas faturas ainda não foram pagas — pode incluir faturas anteriores e compras que só entram nas próximas. Ao pagar uma fatura, as compras dela saem deste valor.</div>
+          <div><span style="font-weight:600">Limite disponível</span><br>Limite total − Limite utilizado.</div>
         </div>
       </div>
     </div>
-    <button class="btn btn-green btn-sm" onclick="openCartaoModal()">+ Novo Cartão</button></div></div><div class="tbl-wrap">${sortableTable('cartoes',['Cartão','Bandeira','Conta Vinculada','Fecha','Vence','Limite','Fatura aberta','Limite disponível',''],rows)}</div></div>`)
+    <button class="btn btn-green btn-sm" onclick="openCartaoModal()">+ Novo Cartão</button></div></div><div class="tbl-wrap">${sortableTable('cartoes',['Cartão','Bandeira','Conta Vinculada','Fecha','Vence','Limite','Fatura atual','Limite utilizado','Limite disponível',''],rows)}</div></div>`)
 }
 function openCartaoModal(eid){const c=eid?db.cartoes.find(x=>x.id===eid):null;showM(c?'Editar Cartão':'Novo Cartão','modal-lg',`<div class="fgrid"><div class="fg full"><label>Nome do Cartão *</label><input type="text" id="k-nm" value="${esc(c?c.nome:'')}" placeholder="Ex: Nubank Roxinho"></div><div class="fg"><label>Bandeira</label><select id="k-bd">${['Mastercard','Visa','Elo','American Express','Hipercard','Outros'].map(b=>`<option ${c&&c.bandeira===b?'selected':''}>${b}</option>`).join('')}</select></div><div class="fg"><label>Conta Vinculada</label><select id="k-ct"><option value="">— Nenhuma —</option>${db.contas.filter(x=>x.ativo).sort(cmpName).map(x=>`<option value="${x.id}" ${c&&c.conta_id===x.id?'selected':''}>${esc(x.nome)}</option>`).join('')}</select></div><div class="fg"><label>Dia de Fechamento</label><input type="number" id="k-fc" min="1" max="31" value="${c?c.fechamento:1}"></div><div class="fg"><label>Dia de Vencimento</label><input type="number" id="k-vc" min="1" max="31" value="${c?c.vencimento:10}"></div><div class="fg"><label>Limite Total (R$) *</label><input type="number" id="k-lm" step="0.01" value="${c?c.limite:''}"></div><div class="fg"><label>Cor</label><input type="color" id="k-cor" value="${c?c.cor:CORES_PRESET[0]}" style="height:38px"></div></div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveCartao(${eid||0},true)">${c?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveCartao(${eid||0})">${c?'Salvar':'Criar Cartão'}</button>`)}
 function saveCartao(eid,andNew){const nm=fv('k-nm').trim(),bd=fv('k-bd'),ct=parseInt(fv('k-ct'))||null,fc=parseInt(fv('k-fc'))||1,vc=parseInt(fv('k-vc'))||10,lm=parseFloat(fv('k-lm'))||0,cor=fv('k-cor');if(!nm||!lm){alert('Preencha os campos obrigatórios.');return}if(eid){const i=db.cartoes.findIndex(c=>c.id===eid),old=db.cartoes[i].nome;db.cartoes[i]={...db.cartoes[i],nome:nm,bandeira:bd,conta_id:ct,fechamento:fc,vencimento:vc,limite:lm,cor};db.lancamentos.forEach(l=>{if(l.conta===old)l.conta=nm})}else db.cartoes.push({id:nid(db.cartoes),nome:nm,bandeira:bd,conta_id:ct,fechamento:fc,vencimento:vc,limite:lm,cor,ativo:true});save();closeM();if(andNew)openCartaoModal();else pCartoes()}
@@ -1581,14 +1565,10 @@ let _fatMes = null;
 function getFaturaTransacoes(cartaoId, mes){
   const c = db.cartoes.find(x=>x.id===cartaoId);
   if(!c) return [];
-  const [y,m] = mes.split('-').map(Number);
-  // Janela: após fechamento do mês anterior até fechamento deste mês
-  const fechAnt = new Date(y, m-2, c.fechamento, 12);
-  const fechAtu = new Date(y, m-1, c.fechamento, 12);
+  // Fonte única: cada compra pertence à fatura definida por faturaMesCompra.
+  // Garante consistência total com faturaAberta (limite utilizado).
   return db.lancamentos.filter(l =>
-    l.conta===c.nome && l.tipo==='D' &&
-    l.data > fechAnt.toISOString().slice(0,10) &&
-    l.data <= fechAtu.toISOString().slice(0,10)
+    l.conta===c.nome && l.tipo==='D' && faturaMesCompra(c,l.data)===mes
   );
 }
 
@@ -1620,13 +1600,14 @@ function openPagarFaturaModal(cartaoId, mes, total){
   const datas = getFaturaVencimento(cartaoId, mes);
   const contasOpts = db.contas.filter(x=>x.ativo&&x.tipo!=='Investimento').sort(cmpName)
     .map(x=>`<option value="${esc(x.nome)}">${esc(x.nome)} (${R(saldoConta(x.nome))})</option>`).join('');
-  showM(`Pagar Fatura — ${esc(c.nome)} ${mes}`,'modal-lg',`
+  showM(`Pagar Fatura — ${esc(c.nome)} · ${faturaLabelMes(cartaoId,mes)}`,'modal-lg',`
     <div class="fgrid">
-      <div class="fg full"><div class="tip tip-blue">O pagamento gerará um débito na conta selecionada e marcará a fatura como paga. As compras desta fatura passarão para <strong>pago</strong>.</div></div>
+      <div class="fg full"><div class="tip tip-blue">O pagamento gerará um débito na conta selecionada e marcará a fatura como paga. Se pagar <strong>menos que o total</strong>, o restante entra como <strong>"Saldo anterior"</strong> na próxima fatura (juros, se houver, lance manualmente como compra).</div></div>
       <div class="fg"><label>Data do Pagamento *</label><input type="date" id="pf-dt" value="${datas?datas.vencimento:new Date().toISOString().slice(0,10)}"></div>
-      <div class="fg"><label>Valor a pagar (R$) *</label><input type="number" id="pf-vl" step="0.01" value="${total.toFixed(2)}"></div>
+      <div class="fg"><label>Valor a pagar (R$) *</label><input type="number" id="pf-vl" step="0.01" min="0.01" max="${total.toFixed(2)}" value="${total.toFixed(2)}" oninput="const t=${total.toFixed(2)},v=parseFloat(this.value)||0,h=document.getElementById('pf-hint');if(h)h.innerHTML=v>0&&v<t?'↪ Restante de <strong>'+(t-v).toFixed(2).replace('.',',')+'</strong> irá para a próxima fatura':''"></div>
+      <div class="fg full"><div class="txt-xs" id="pf-hint" style="color:var(--amber)"></div></div>
       <div class="fg full"><label>Conta de Débito *</label><select id="pf-cn">${contasOpts}</select></div>
-      <div class="fg full"><label>Observação</label><input type="text" id="pf-ob" value="Pagamento fatura ${esc(c.nome)} ${mes}" placeholder="Opcional"></div>
+      <div class="fg full"><label>Observação</label><input type="text" id="pf-ob" value="Pagamento fatura ${esc(c.nome)}" placeholder="Opcional"></div>
     </div>`,
   `<button class="btn btn-ghost" onclick="closeM();pFaturas()">Voltar</button>
    <button class="btn btn-dark" onclick="savePagarFatura(${cartaoId},'${mes}')">✓ Confirmar Pagamento</button>`);
@@ -1635,13 +1616,24 @@ function openPagarFaturaModal(cartaoId, mes, total){
 function savePagarFatura(cartaoId, mes){
   const c = db.cartoes.find(x=>x.id===cartaoId);
   const dt=fv('pf-dt'), vl=parseFloat(fv('pf-vl')), cn=fv('pf-cn'), ob=fv('pf-ob');
-  if(!dt||!vl||!cn){alert('Preencha todos os campos.');return}
+  if(!dt||!vl||vl<=0||!cn){alert('Preencha todos os campos (valor deve ser maior que zero).');return}
+  const total=faturaTotalMes(cartaoId,mes);
+  if(vl>total+0.005){alert('O valor a pagar não pode ser maior que o total da fatura.');return}
+  const datas=getFaturaVencimento(cartaoId,mes);
+  // Remove pagamento e resíduo anteriores deste mês (repagamento)
   db.faturas_pagas = db.faturas_pagas.filter(x=>!(x.cartao_id===cartaoId&&x.mes===mes));
-  db.faturas_pagas.push({id:nid(db.faturas_pagas),cartao_id:cartaoId,mes,valor:vl,conta_pagamento:cn,data_pagamento:dt});
-  // Atualiza descrição da provisão se informada
+  db.lancamentos = db.lancamentos.filter(l=>!(l.origem==='residual_fatura'&&l.cartao_id===cartaoId&&l.res_de_mes===mes));
+  db.faturas_pagas.push({id:nid(db.faturas_pagas),cartao_id:cartaoId,mes,valor:vl,total,conta_pagamento:cn,data_pagamento:dt});
+  // Observação vai para obs da provisão (a descrição é padronizada pelo sistema)
   const prov=db.lancamentos.find(l=>l.origem==='provisao_fatura'&&l.cartao_id===cartaoId&&l.fatura_mes===mes);
-  if(prov&&ob)prov.desc=ob;
+  if(prov&&ob)prov.obs=ob;
   getFaturaTransacoes(cartaoId, mes).forEach(l=>{l.pago=true});
+  // Pagamento parcial: restante rola como item da PRÓXIMA fatura
+  const resto=total-vl;
+  if(resto>0.005&&datas){
+    const catPag=db.categorias.find(x=>x.nome==='Outros (Despesa)')||db.categorias.find(x=>x.tipo==='D');
+    db.lancamentos.push({id:nid(db.lancamentos),data:addDays(datas.fechamento,1),desc:`Saldo restante da fatura de ${faturaLabelMes(cartaoId,mes).toLowerCase()}`,tipo:'D',cat_id:catPag?.id||null,conta:c.nome,valor:Math.round(resto*100)/100,obs:`Pagamento parcial em ${fdt(dt)} (${R(vl)} de ${R(total)})`,importado:false,pago:false,origem:'residual_fatura',cartao_id:cartaoId,res_de_mes:mes});
+  }
   save();
   ensureProvisaoFatura(cartaoId, mes); // atualiza/cria provisão como paga na conta certa
   closeM();
@@ -1650,13 +1642,16 @@ function savePagarFatura(cartaoId, mes){
 }
 
 function estornarFatura(cartaoId, mes){
-  if(!confirm('Estornar pagamento? A provisão volta para pendente na conta vinculada.'))return;
+  if(!confirm('Estornar pagamento? A provisão volta para pendente e o eventual saldo rolado para a próxima fatura será removido.'))return;
   db.faturas_pagas = db.faturas_pagas.filter(x=>!(x.cartao_id===cartaoId&&x.mes===mes));
-  // Remove legados pagamento_fatura se ainda existirem
+  // Remove resíduo gerado por este pagamento e legados pagamento_fatura
+  db.lancamentos = db.lancamentos.filter(l=>!(l.origem==='residual_fatura'&&l.cartao_id===cartaoId&&l.res_de_mes===mes));
   db.lancamentos = db.lancamentos.filter(l=>!(l.origem==='pagamento_fatura'&&l.cartao_id===cartaoId&&l.fatura_mes===mes));
+  // Compras da fatura voltam para pendente
+  getFaturaTransacoes(cartaoId, mes).forEach(l=>{l.pago=false});
   save();
   ensureProvisaoFatura(cartaoId, mes); // reverte provisão para pendente
-  pFaturas();
+  if(page==='faturas')pFaturas();else go(page);
 }
 
 // ── FATURA DETALHADA (tela full-page com navegação) ──────────────────
@@ -1693,10 +1688,11 @@ function pFaturas(){
   const [vY,vM] = vencStr.split('-').map(Number);
   const mesNome = new Date(vY, vM-1, 1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
 
-  // Status
+  // Status (detecta pagamento parcial)
+  const parcial = fp && fp.total!==undefined && fp.valor < fp.total - 0.005;
   const diasVenc = datas?Math.ceil((new Date(datas.vencimento)-new Date(hoje))/(1000*60*60*24)):0;
-  const statusColor = fp?'c-g':diasVenc<0&&total>0?'c-r':diasVenc<=5&&total>0?'c-a':'c-b';
-  const statusTxt = fp?`✓ Paga em ${fdt(fp.data_pagamento)}`
+  const statusColor = fp?(parcial?'c-a':'c-g'):diasVenc<0&&total>0?'c-r':diasVenc<=5&&total>0?'c-a':'c-b';
+  const statusTxt = fp?(parcial?`◐ Paga parcialmente em ${fdt(fp.data_pagamento)}`:`✓ Paga em ${fdt(fp.data_pagamento)}`)
     :diasVenc<0&&total>0?`⚠ Vencida há ${Math.abs(diasVenc)}d`
     :diasVenc<=5&&total>0?`⚡ Vence em ${diasVenc}d`
     :total>0?`Aberta — vence ${fdt(datas?.vencimento)}`:'Sem lançamentos';
@@ -1705,6 +1701,7 @@ function pFaturas(){
   const cardSel = cards.map(cd=>`<option value="${cd.id}" ${cd.id===cartaoId?'selected':''}>${esc(cd.nome)}</option>`).join('');
 
   // Agrupar transações
+  const resid    = transacoes.filter(l=>l.origem==='residual_fatura');
   const manuais  = transacoes.filter(l=>l.origem==='manual'||l.origem==='importado');
   const parc     = transacoes.filter(l=>l.origem==='parcelado');
   const fixos    = transacoes.filter(l=>l.origem==='fixo');
@@ -1714,7 +1711,7 @@ function pFaturas(){
     const pagoBtn = `<button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id});pFaturas()">${l.pago!==false?'✓ Pago':'Pendente'}</button>`;
     const acoes = l.origem==='manual'||l.origem==='importado'
       ?`<div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLancFatura(${l.id})">🗑</button></div>`
-      :`<span class="txt-xs" style="color:var(--ink3)">${l.origem}</span>`;
+      :`<span class="txt-xs" style="color:var(--ink3)">${{parcelado:'parcelado',fixo:'fixo',residual_fatura:'automático'}[l.origem]||l.origem}</span>`;
     return `<tr>
       <td class="mono txt-xs">${fdt(l.data)}</td>
       <td>${badge}${esc(l.desc)}${l.parcela_num?`<br><span class="txt-xs" style="color:var(--purple)">Parcela ${l.parcela_num}/${l.parcela_total}</span>`:''}</td>
@@ -1759,7 +1756,10 @@ function pFaturas(){
     <div class="kpi ${statusColor}"><div class="kpi-lbl">Status</div><div class="kpi-val" style="font-size:13px;line-height:1.3">${statusTxt}</div></div>
   </div>
 
-  ${fp?`<div class="tip tip-green" style="margin-bottom:16px">✅ Fatura paga em ${fdt(fp.data_pagamento)} via <strong>${esc(fp.conta_pagamento)}</strong> — ${R(fp.valor)}</div>`:''}
+  ${fp?(parcial
+    ?`<div class="tip tip-amber" style="margin-bottom:16px">◐ Fatura paga <strong>parcialmente</strong> em ${fdt(fp.data_pagamento)} via <strong>${esc(fp.conta_pagamento)}</strong> — ${R(fp.valor)} de ${R(fp.total)}. O restante (${R(fp.total-fp.valor)}) foi lançado como "Saldo anterior" na próxima fatura.</div>`
+    :`<div class="tip tip-green" style="margin-bottom:16px">✅ Fatura paga em ${fdt(fp.data_pagamento)} via <strong>${esc(fp.conta_pagamento)}</strong> — ${R(fp.valor)}</div>`):''}
+  ${!c.conta_id?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Este cartão não tem <strong>conta vinculada</strong> — a fatura não aparece em Lançamentos nem nas projeções do Painel. <a href="#" onclick="openCartaoModal(${c.id});return false" style="color:inherit;font-weight:700">Vincular conta</a></div>`:''}
 
   <!-- Tabela agrupada -->
   <div class="card">
@@ -1771,6 +1771,7 @@ function pFaturas(){
       <table>
         <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Valor</th><th>Status</th><th></th></tr></thead>
         <tbody>
+          ${resid.length?section('↪ Saldo anterior (pagamento parcial)', resid, '', ''):''}
           ${section('🛒 Compras avulsas', manuais, '', 'Nenhuma compra avulsa neste período')}
           ${section('📦 Parcelados', parc, '', 'Nenhuma parcela neste período')}
           ${section('🔁 Lançamentos fixos', fixos, '', 'Nenhum lançamento fixo neste período')}
@@ -2294,6 +2295,8 @@ async function bootApp(){
       if(_unsubscribe) _unsubscribe();
       const docRef = _fire.doc(_fire.fs, DB_DOC);
       _unsubscribe = _fire.onSnapshot(docRef, (snap)=>{
+        // Ignora eco local do próprio write (evita re-render em loop)
+        if(snap.metadata&&snap.metadata.hasPendingWrites)return;
         if(snap.exists()){
           try{
             const remote = JSON.parse(snap.data().data);
@@ -2301,7 +2304,9 @@ async function bootApp(){
             if(!_saveTimeout){
               db = remote;
               migrateDB_quiet();
-              go(page);
+              // Não re-renderiza por cima de um modal aberto (perderia o que o usuário está digitando)
+              const modalAberto=!document.getElementById('M').classList.contains('hidden');
+              if(!modalAberto)go(page);
             }
           }catch(e){console.error('Parse error:',e)}
         } else {
