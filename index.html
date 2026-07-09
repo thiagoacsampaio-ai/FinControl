@@ -260,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.5 ☁</span>
+    <span>v3.6 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -387,6 +387,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 // v3.5: módulo Controle PJ — receitas recebidas/a receber por contas PJ,
 // Fator R sobre RBT12 (Anexo III/V), DAS estimado e provisionável,
 // pró-labore com INSS/IRRF por tabelas editáveis (tela de Parâmetros).
+// v3.6: Notas Fiscais no Controle PJ — a emissão da NF é o fato gerador:
+// receita fiscal, RBT12, DAS e pró-labore calculados pelas notas do mês;
+// recebimentos (adiantamento/complemento) vinculáveis à NF com saldo.
 // ════════════════════════════════════════════════════════════════════
 const DB_DOC = 'shared/fincontrol'; // caminho único compartilhado no Firestore
 const ALLOWED_EMAILS = ['thiagoacsampaio@gmail.com', 'casorio.et@gmail.com']; // lista de e-mails com acesso permitido
@@ -1748,8 +1751,10 @@ function ensurePJDefaults(){
   if(!db.pj)db.pj={};
   const p=db.pj;
   if(!p.contas)p.contas=db.contas.filter(c=>c.subtipo==='PJ').map(c=>c.nome);
+  if(!p.notas)p.notas=[]; // notas fiscais emitidas: {id,data_emissao,numero,desc,valor,obs,lanc_ids[]}
   if(!p.params)p.params={};
   const pp=p.params;
+  if(pp.base===undefined)pp.base='auto'; // auto: usa NF se houver notas | nf | receb
   if(pp.regime===undefined)pp.regime='competencia';   // competência | caixa
   if(pp.fator_r_alvo===undefined)pp.fator_r_alvo=28;  // %
   if(pp.das_dia===undefined)pp.das_dia=20;            // vencimento DAS (mês seguinte)
@@ -1783,8 +1788,16 @@ function pjCalcIRRF(bruto,inss){const pp=db.pj.params;const base=Math.max(0,brut
   for(const f of pp.irrf_faixas){if(!f.ate||base<=f.ate)return Math.max(0,base*f.aliq/100-f.deduz);}
   return 0;}
 function pjAliquotaEfetiva(tab,rbt){if(rbt<=0)return tab[0].aliq/100;const f=tab.find(x=>rbt<=x.ate)||tab[tab.length-1];return Math.max(0,(rbt*f.aliq/100-f.deduz)/rbt);}
+// ── Notas Fiscais ──
+function pjUsaNF(){ensurePJDefaults();const b=db.pj.params.base||'auto';return b==='nf'||(b==='auto'&&db.pj.notas.length>0);}
+function pjNotasMes(mk){ensurePJDefaults();return db.pj.notas.filter(n=>ym(n.data_emissao)===mk).sort((a,b)=>a.data_emissao<b.data_emissao?-1:1);}
+function pjNFRecebido(n){return (n.lanc_ids||[]).reduce((s,id)=>{const l=db.lancamentos.find(x=>x.id===id);return s+(l&&l.pago!==false?Number(l.valor||0):0);},0);}
+function pjNFVinculado(n){return (n.lanc_ids||[]).reduce((s,id)=>{const l=db.lancamentos.find(x=>x.id===id);return s+(l?Number(l.valor||0):0);},0);}
 // RBT12: receita bruta dos 12 meses ANTERIORES ao mês de apuração
-function pjRBT12(mk){const contas=pjContas();let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R'&&l.pago!==false&&ym(l.data)===m).reduce((a,l)=>a+Number(l.valor||0),0);}return s;}
+// Base NF: soma das notas emitidas; senão, recebimentos efetivados
+function pjRBT12(mk){
+  if(pjUsaNF()){let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.pj.notas.filter(n=>ym(n.data_emissao)===m).reduce((a,n)=>a+Number(n.valor||0),0);}return s;}
+  const contas=pjContas();let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R'&&l.pago!==false&&ym(l.data)===m).reduce((a,l)=>a+Number(l.valor||0),0);}return s;}
 // Folha 12m p/ Fator R = pró-labore BRUTO provisionado nos 12 meses anteriores
 function pjFolha12(mk){let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>l.pj_tipo==='prolabore'&&l.pj_mes===m).reduce((a,l)=>a+Number(l.pj_bruto||l.valor||0),0);}return s;}
 
@@ -1796,23 +1809,28 @@ function pjResumo(mk){
   const recebido=recs.filter(l=>l.pago!==false).reduce((s,l)=>s+Number(l.valor||0),0);
   const aReceber=recs.filter(l=>l.pago===false).reduce((s,l)=>s+Number(l.valor||0),0);
   const receitaMes=pp.regime==='caixa'?recebido:recebido+aReceber;
+  // Base fiscal: NF emitidas no mês (fato gerador) ou recebimentos, conforme parâmetro
+  const usaNF=pjUsaNF();
+  const notasMes=usaNF?pjNotasMes(mk):[];
+  const nfTot=notasMes.reduce((s,n)=>s+Number(n.valor||0),0);
+  const receitaFiscal=usaNF?nfTot:receitaMes;
   const rbt=pjRBT12(mk), folha=pjFolha12(mk);
   const plMesL=db.lancamentos.find(l=>l.pj_tipo==='prolabore'&&l.pj_mes===mk);
   const folhaMes=plMesL?Number(plMesL.pj_bruto||plMesL.valor||0):0;
   // Início de atividade (sem RBT12): usa a proporção do próprio mês
-  const fr=rbt>0?folha/rbt:(receitaMes>0?folhaMes/receitaMes:0);
+  const fr=rbt>0?folha/rbt:(receitaFiscal>0?folhaMes/receitaFiscal:0);
   const anexo=fr>=pp.fator_r_alvo/100?'III':'V';
   const tab=anexo==='III'?pp.anexo3:pp.anexo5;
-  const rbtBase=rbt>0?rbt:receitaMes*12; // projeção p/ empresa nova
+  const rbtBase=rbt>0?rbt:receitaFiscal*12; // projeção p/ empresa nova
   const aliq=pjAliquotaEfetiva(tab,rbtBase);
-  const das=receitaMes*aliq;
-  const taxas=pp.taxas.map(t=>({nome:t.nome,perc:t.perc,valor:receitaMes*t.perc/100}));
+  const das=receitaFiscal*aliq;
+  const taxas=pp.taxas.map(t=>({nome:t.nome,perc:t.perc,valor:receitaFiscal*t.perc/100}));
   const taxasTot=taxas.reduce((s,t)=>s+t.valor,0);
-  const baseMensal=rbt>0?rbt/12:receitaMes;
+  const baseMensal=rbt>0?rbt/12:receitaFiscal;
   const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
   const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&(l.tipo==='D'||l.tipo==='I')&&ym(l.data)===mk);
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,rbt,folha,fr,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,folha,fr,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
 }
 
 // ── Tela principal ──
@@ -1866,25 +1884,49 @@ function pPJ(){
       <button class="btn btn-ghost btn-sm" onclick="openPJParams()">⚙ Parâmetros</button>
       <button class="btn btn-ghost btn-sm" onclick="openProlaboreModal()">💼 Pró-labore</button>
       <button class="btn btn-ghost btn-sm" onclick="pjProvisionarDAS()">🧾 Provisionar DAS</button>
-      <button class="btn btn-green btn-sm" onclick="openPJReceita()">+ Recebimento</button>
+      <button class="btn btn-ghost btn-sm" onclick="openPJReceita()">+ Recebimento</button>
+      <button class="btn btn-green btn-sm" onclick="openNFModal()">📄 + Nota Fiscal</button>
     </div>
   </div>
 
-  <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
+  <div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
+    <div class="kpi c-p"><div class="kpi-lbl">${r.usaNF?'NF Emitidas no Mês':'Receita Fiscal do Mês'}</div><div class="kpi-val">${R(r.receitaFiscal)}</div><div class="kpi-sub">${r.usaNF?`${r.notasMes.length} nota(s) — base dos impostos`:'base dos impostos ('+(r.pp.regime==='caixa'?'caixa':'competência')+')'}</div></div>
     <div class="kpi c-g"><div class="kpi-lbl">Recebido no Mês</div><div class="kpi-val">${R(r.recebido)}</div></div>
     <div class="kpi c-b"><div class="kpi-lbl">A Receber no Mês</div><div class="kpi-val">${R(r.aReceber)}</div></div>
     <div class="kpi c-r"><div class="kpi-lbl">Despesas PJ no Mês</div><div class="kpi-val">${R(r.despTot)}</div></div>
-    <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">receita (${r.pp.regime==='caixa'?'caixa':'competência'}) − despesas</div></div>
+    <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">caixa: recebido + a receber − despesas</div></div>
   </div>
   <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
     <div class="kpi c-t"><div class="kpi-lbl">RBT12</div><div class="kpi-val">${R(r.rbt)}</div><div class="kpi-sub">receita bruta 12 meses anteriores</div></div>
     <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}</div></div>
     <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">Simples Nacional — Anexo ${r.anexo}</div></div>
-    <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaMes)}`}</div></div>
+    <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaFiscal)}${r.usaNF?' em NF':''}`}</div></div>
   </div>
 
-  ${!frOk&&r.receitaMes+r.rbt>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Fator R em ${frPct}% — abaixo do alvo de ${r.pp.fator_r_alvo}%. Pró-labore sugerido: <strong>${R(r.sugerido)}/mês</strong> para enquadrar no Anexo III (alíquota inicial 6%). <button class="btn btn-xs btn-dark" onclick="openProlaboreModal()">Provisionar pró-labore</button></div>`:''}
+  ${r.usaNF&&!r.notasMes.length&&(r.recebido+r.aReceber)>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Há recebimentos neste mês mas <strong>nenhuma NF emitida</strong> — os impostos estão calculados sobre R$ 0,00. <button class="btn btn-xs btn-dark" onclick="openNFModal()">Registrar NF</button></div>`:''}
+  ${!frOk&&r.receitaFiscal+r.rbt>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Fator R em ${frPct}% — abaixo do alvo de ${r.pp.fator_r_alvo}%. Pró-labore sugerido: <strong>${R(r.sugerido)}/mês</strong> para enquadrar no Anexo III (alíquota inicial 6%). <button class="btn btn-xs btn-dark" onclick="openProlaboreModal()">Provisionar pró-labore</button></div>`:''}
   ${r.plMesL?`<div class="tip tip-green" style="margin-bottom:16px">💼 Pró-labore de ${mesLabel(mk)}: bruto <strong>${R(r.plMesL.pj_bruto)}</strong> → INSS ${R(inss)} · IRRF ${R(irrf)} · líquido <strong>${R((r.plMesL.pj_bruto||0)-inss-irrf)}</strong></div>`:''}
+
+  ${r.usaNF||r.notasMes.length?`<div class="card" style="margin-bottom:16px">
+    <div class="card-head"><h3>📄 Notas Fiscais — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">a emissão da NF é a base dos impostos e do pró-labore</span></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Emissão</th><th>Nº</th><th>Descrição / Tomador</th><th>Valor</th><th>Recebido</th><th>Saldo</th><th>Status</th><th></th></tr></thead><tbody>
+      ${r.notasMes.length?r.notasMes.map(n=>{
+        const receb=pjNFRecebido(n);
+        const vinc=pjNFVinculado(n);
+        const saldo=Math.max(0,Number(n.valor||0)-receb);
+        const st=receb>=Number(n.valor||0)-0.005?'<span class="tag tag-g">✓ Recebida</span>':receb>0?`<span class="tag tag-a">◐ Parcial</span>`:vinc>0?'<span class="tag tag-b">Vinculada</span>':'<span class="tag tag-x">A receber</span>';
+        return `<tr>
+          <td class="mono txt-xs">${fdt(n.data_emissao)}</td>
+          <td class="mono txt-xs">${esc(n.numero||'—')}</td>
+          <td>${esc(n.desc||'')}${(n.lanc_ids||[]).length?`<br><span class="txt-xs" style="color:var(--ink3)">${n.lanc_ids.length} recebimento(s) vinculado(s)</span>`:''}</td>
+          <td class="v-pos fw7">${R(n.valor)}</td>
+          <td class="v-pos">${R(receb)}</td>
+          <td class="${saldo>0.005?'v-neg':'v-pos'}">${R(saldo)}</td>
+          <td>${st}</td>
+          <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openNFModal(${n.id})" title="Editar / vincular recebimentos">✏️</button><button class="ico-btn" onclick="delNF(${n.id})">🗑</button></div></td>
+        </tr>`;}).join(''):'<tr><td colspan="8"><div class="empty" style="padding:24px"><big>📄</big>Nenhuma NF emitida neste mês</div></td></tr>'}
+    </tbody></table></div>
+  </div>`:''}
 
   <div class="two">
     <div class="card">
@@ -1917,13 +1959,63 @@ function openPJReceita(){
   },80);
 }
 
+// ── Nota Fiscal ──
+function openNFModal(id){
+  ensurePJDefaults();
+  const n=id?db.pj.notas.find(x=>x.id===id):null;
+  const hoje=new Date().toISOString().slice(0,10);
+  const emissao=n?n.data_emissao:(_pjMes===hoje.slice(0,7)?hoje:_pjMes+'-01');
+  // Recebimentos candidatos: R das contas PJ não vinculados a OUTRA nota (mais recentes primeiro)
+  const usados=new Set();db.pj.notas.forEach(x=>{if(!n||x.id!==n.id)(x.lanc_ids||[]).forEach(i=>usados.add(i));});
+  const sel=new Set(n?(n.lanc_ids||[]):[]);
+  const cands=db.lancamentos.filter(l=>pjContas().includes(l.conta)&&l.tipo==='R'&&(!usados.has(l.id)||sel.has(l.id))).sort((a,b)=>a.data<b.data?1:-1).slice(0,50);
+  const lkRows=cands.map(l=>`<label style="display:flex;align-items:center;gap:8px;font-weight:400;padding:5px 8px;border-bottom:1px solid var(--line2);cursor:pointer"><input type="checkbox" id="nf-lk-${l.id}" style="width:auto" ${sel.has(l.id)?'checked':''} onchange="nfSum()"><span class="mono txt-xs" style="min-width:78px">${fdt(l.data)}</span><span style="flex:1">${esc(l.desc)}</span><span class="tag ${l.pago!==false?'tag-g':'tag-x'}" style="font-size:9px">${l.pago!==false?'recebido':'a receber'}</span><span class="v-pos mono" data-vl="${Number(l.valor||0)}">${R(l.valor)}</span></label>`).join('');
+  showM(n?'Editar Nota Fiscal':'Registrar Nota Fiscal','modal-lg',`
+    <div class="fgrid">
+      <div class="fg full"><div class="tip tip-blue">📄 A NF é o <strong>fato gerador</strong>: a receita do mês da <strong>emissão</strong> define DAS, Fator R e pró-labore — mesmo que os recebimentos (adiantamento/complemento) caiam em meses diferentes. Vincule-os abaixo para acompanhar o saldo da nota.</div></div>
+      <div class="fg"><label>Data de Emissão *</label><input type="date" id="nf-dt" value="${emissao}"></div>
+      <div class="fg"><label>Número da NF</label><input type="text" id="nf-num" value="${esc(n?n.numero:'')}" placeholder="Ex: 000123"></div>
+      <div class="fg"><label>Valor Total (R$) *</label><input type="number" id="nf-vl" step="0.01" value="${n?n.valor:''}" placeholder="0,00" oninput="nfSum()"></div>
+      <div class="fg"><label>Descrição / Tomador</label><input type="text" id="nf-ds" value="${esc(n?n.desc:'')}" placeholder="Ex: Serviços de TI — Cliente X"></div>
+      <div class="fg full"><label>Recebimentos vinculados <span class="txt-xs" style="font-weight:400;color:var(--ink3)" id="nf-sum"></span></label>
+        <div style="max-height:180px;overflow-y:auto;border:1.5px solid var(--line);border-radius:var(--r)">${lkRows||'<div class="txt-xs" style="padding:10px;color:var(--ink3)">Nenhum recebimento disponível — registre pelo botão "+ Recebimento" e volte aqui para vincular.</div>'}</div>
+      </div>
+      <div class="fg full"><label>Observação</label><input type="text" id="nf-ob" value="${esc(n?n.obs:'')}" placeholder="Opcional"></div>
+    </div>`,
+  `<button class="btn btn-ghost" onclick="closeM()">Cancelar</button>
+   <button class="btn btn-dark" onclick="saveNF(${id||0})">${n?'Salvar':'✓ Registrar NF'}</button>`);
+  setTimeout(nfSum,50);
+}
+function nfSum(){
+  const el=document.getElementById('nf-sum');if(!el)return;
+  let s=0;document.querySelectorAll('[id^="nf-lk-"]').forEach(c=>{if(c.checked){const v=c.parentElement.querySelector('[data-vl]');s+=parseFloat(v?.dataset.vl||0);}});
+  const vl=parseFloat(fv('nf-vl'))||0;
+  el.textContent=s?`— vinculado ${R(s)}${vl?` de ${R(vl)} (saldo ${R(Math.max(0,vl-s))})`:''}`:'';
+}
+function saveNF(id){
+  ensurePJDefaults();
+  const dt=fv('nf-dt'),vl=parseFloat(fv('nf-vl')),num=fv('nf-num').trim(),ds=fv('nf-ds').trim(),ob=fv('nf-ob');
+  if(!dt||!vl||vl<=0){alert('Informe a data de emissão e o valor da NF.');return;}
+  const lanc_ids=[];document.querySelectorAll('[id^="nf-lk-"]').forEach(c=>{if(c.checked)lanc_ids.push(parseInt(c.id.slice(6)));});
+  if(id){const n=db.pj.notas.find(x=>x.id===id);if(n){n.data_emissao=dt;n.valor=vl;n.numero=num;n.desc=ds;n.obs=ob;n.lanc_ids=lanc_ids;}}
+  else db.pj.notas.push({id:nid(db.pj.notas),data_emissao:dt,valor:vl,numero:num,desc:ds,obs:ob,lanc_ids});
+  save();closeM();
+  _pjMes=ym(dt);
+  pPJ();
+}
+function delNF(id){
+  if(!confirm('Excluir esta Nota Fiscal? Os recebimentos vinculados NÃO serão excluídos, apenas desvinculados.'))return;
+  db.pj.notas=db.pj.notas.filter(n=>n.id!==id);
+  save();pPJ();
+}
+
 // ── Provisionar DAS (+ taxas extras) ──
 function pjProvisionarDAS(){
   const mk=_pjMes;
   const r=pjResumo(mk);
-  if(r.das<=0){alert('Sem receita no mês — nada a provisionar.');return;}
+  if(r.das<=0){alert(r.usaNF?'Nenhuma NF emitida no mês — nada a provisionar.':'Sem receita no mês — nada a provisionar.');return;}
   const venc=(()=>{const n=addMonths(mk+'-01',1).slice(0,7);return n+'-'+String(Math.min(r.pp.das_dia,monthEnd(n))).padStart(2,'0');})();
-  const txt=`DAS ${mesLabel(mk)}: ${R(r.das)} (${(r.aliq*100).toFixed(2)}% × ${R(r.receitaMes)}, Anexo ${r.anexo})${r.taxas.length?'\n'+r.taxas.map(t=>`${t.nome}: ${R(t.valor)}`).join('\n'):''}\nVencimento: ${fdt(venc)}\n\nProvisionar como despesa pendente na conta ${r.contas[0]}?`;
+  const txt=`DAS ${mesLabel(mk)}: ${R(r.das)} (${(r.aliq*100).toFixed(2)}% × ${R(r.receitaFiscal)}${r.usaNF?' em NF':''}, Anexo ${r.anexo})${r.taxas.length?'\n'+r.taxas.map(t=>`${t.nome}: ${R(t.valor)}`).join('\n'):''}\nVencimento: ${fdt(venc)}\n\nProvisionar como despesa pendente na conta ${r.contas[0]}?`;
   if(!confirm(txt))return;
   const cat=findOrCreateCat('Impostos e Taxas PJ','D','🧾');
   const upsert=(pjTipo,desc,valor)=>{
@@ -1996,7 +2088,8 @@ function openPJParams(){
     <div class="fgrid">
       <div class="fg full"><div class="tip tip-amber">⚠ Os valores abaixo são referência e mudam por lei — <strong>confira com seu contador</strong> e atualize aqui quando houver reajuste (salário mínimo, teto INSS, tabela IRRF, anexos do Simples).</div></div>
       <div class="fg full"><label>Contas da empresa (PJ)</label><div style="padding:8px 0">${contasChk}</div></div>
-      <div class="fg"><label>Regime de apuração da receita</label><select id="pj-regime"><option value="competencia" ${pp.regime!=='caixa'?'selected':''}>Competência (recebidos + a receber)</option><option value="caixa" ${pp.regime==='caixa'?'selected':''}>Caixa (somente recebidos)</option></select></div>
+      <div class="fg"><label>Base de cálculo dos impostos</label><select id="pj-base"><option value="auto" ${pp.base==='auto'||!pp.base?'selected':''}>Automática (NF quando houver notas)</option><option value="nf" ${pp.base==='nf'?'selected':''}>Notas Fiscais emitidas</option><option value="receb" ${pp.base==='receb'?'selected':''}>Recebimentos (lançamentos)</option></select><div class="field-hint">Com NF: o mês da emissão define DAS, Fator R e pró-labore</div></div>
+      <div class="fg"><label>Regime da receita (sem NF)</label><select id="pj-regime"><option value="competencia" ${pp.regime!=='caixa'?'selected':''}>Competência (recebidos + a receber)</option><option value="caixa" ${pp.regime==='caixa'?'selected':''}>Caixa (somente recebidos)</option></select></div>
       <div class="fg"><label>Conta PF que recebe o pró-labore líquido</label><select id="pj-conta-pf">${contaPFOpts}</select></div>
       <div class="fg-lbl">Simples Nacional / Fator R</div>
       <div class="fg"><label>Fator R alvo (%)</label><input type="number" id="pj-fr" step="0.1" value="${pp.fator_r_alvo}"><div class="field-hint">≥ este % → Anexo III; abaixo → Anexo V</div></div>
@@ -2019,6 +2112,7 @@ function savePJParams(){
   ensurePJDefaults();
   const pp=db.pj.params;
   db.pj.contas=db.contas.filter(c=>document.getElementById('pj-cta-'+c.id)?.checked).map(c=>c.nome);
+  pp.base=fv('pj-base')||'auto';
   pp.regime=fv('pj-regime')||'competencia';
   pp.conta_pf=fv('pj-conta-pf')||'';
   pp.fator_r_alvo=parseFloat(fv('pj-fr'))||28;
