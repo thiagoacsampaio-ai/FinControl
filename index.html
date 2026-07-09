@@ -1458,11 +1458,57 @@ function pParc(){db.parcelados.forEach(p=>rebuildParcelStatusFromLaunch(p));cons
   });
   set(`<div class="kpi-row" style="grid-template-columns:repeat(4,1fr)"><div class="kpi c-b"><div class="kpi-lbl">Total compras</div><div class="kpi-val">${list.length}</div></div><div class="kpi c-p"><div class="kpi-lbl">Em andamento</div><div class="kpi-val">${list.filter(p=>p.pg<p.np).length}</div></div><div class="kpi c-g"><div class="kpi-lbl">Total pago</div><div class="kpi-val">${R(tPago)}</div></div><div class="kpi c-r"><div class="kpi-lbl">A pagar</div><div class="kpi-val">${R(tRest)}</div></div></div>
   <div class="card"><div class="card-head"><h3>Compras Parceladas</h3><button class="btn btn-green btn-sm" onclick="openParcModal()">+ Nova Compra</button></div>
-  <div class="tip tip-blue" style="margin:12px 18px 0">Ao salvar uma compra parcelada, todas as parcelas são criadas automaticamente em Lançamentos nas datas informadas, com controle individual de pago/pendente.</div>
+  <div class="tip tip-blue" style="margin:12px 18px 0">Ao salvar, todas as parcelas são criadas automaticamente (uma por mês a partir da data da compra). Em cartão, cada parcela entra na fatura correspondente à sua data — o controle de pago acontece junto com o pagamento da fatura.</div>
   <div class="tbl-wrap">${sortableTable('parcelados',['Descrição / Próx. Parcelas','Cartão/Conta','Primeira parcela','Total','Parcelas','Progresso','Parc/Mês','Restante','Status',''],rows)}</div></div>`)
 }
-function openParcModal(eid){const p=eid?db.parcelados.find(x=>x.id===eid):null;showM(p?'Editar Parcelado':'Nova Compra Parcelada',`<div class="fgrid"><div class="fg full"><label>Descrição *</label><input type="text" id="p-ds" value="${esc(p?p.desc:'')}" placeholder="Ex: Geladeira, Notebook..."></div><div class="fg"><label>Categoria</label>${catComboHTML('p-ct','D',p?p.cat_id:null)}</div><div class="fg"><label>Cartão / Conta</label><select id="p-cn">${contaNomes().map(n=>`<option ${p&&p.conta===n?'selected':''}>${esc(n)}</option>`).join('')}</select></div><div class="fg"><label>Data da Compra</label><input type="date" id="p-dt" value="${p?p.data:new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Data da 1ª Parcela</label><input type="date" id="p-pr" value="${p?(p.primeira_data||p.data):new Date().toISOString().slice(0,10)}"></div><div class="fg"><label>Valor Total (R$) *</label><input type="number" id="p-vt" step="0.01" value="${p?p.total:''}" placeholder="0,00"></div><div class="fg"><label>Nº de Parcelas *</label><input type="number" id="p-np" min="1" value="${p?p.np:''}" placeholder="Ex: 12"></div><div class="fg"><label>Parcelas já pagas</label><input type="number" id="p-pg" min="0" value="${p?p.pg:0}"></div><div class="fg full"><label>Observação</label><input type="text" id="p-ob" value="${esc(p?p.obs:'')}" placeholder="Opcional"></div></div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveParc(${eid||0},true)">${p?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveParc(${eid||0})">${p?'Salvar':'Adicionar'}</button>`)}
-function saveParc(eid,andNew){const ds=fv('p-ds').trim(),ct=parseInt(fv('p-ct')),cn=fv('p-cn'),dt=fv('p-dt'),pr=fv('p-pr')||dt,vt=parseFloat(fv('p-vt')),np=parseInt(fv('p-np')),pg=Math.min(parseInt(fv('p-pg'))||0,np||0),ob=fv('p-ob');if(!ds||!vt||!np){alert('Preencha os campos obrigatórios.');return}let p;if(eid){const i=db.parcelados.findIndex(x=>x.id===eid);db.parcelados[i]={...db.parcelados[i],desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};p=db.parcelados[i]}else{p={id:nid(db.parcelados),desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};db.parcelados.push(p)}regenerateParcelLaunches(p);save();closeM();if(andNew)openParcModal();else pParc()}
+function openParcModal(eid){
+  const p=eid?db.parcelados.find(x=>x.id===eid):null;
+  const hoje=new Date().toISOString().slice(0,10);
+  // 1ª parcela diferente da compra = caso avançado (fica atrás de um checkbox)
+  const temPr=!!(p&&p.primeira_data&&p.primeira_data!==p.data);
+  showM(p?'Editar Parcelado':'Nova Compra Parcelada','modal-lg',`<div class="fgrid">
+    <div class="fg full"><label>Descrição *</label><input type="text" id="p-ds" value="${esc(p?p.desc:'')}" placeholder="Ex: Geladeira, Notebook..."></div>
+    <div class="fg"><label>Categoria</label>${catComboHTML('p-ct','D',p?p.cat_id:null)}</div>
+    <div class="fg"><label>Cartão / Conta</label><select id="p-cn" onchange="parcPreview()">${contaNomes().map(n=>`<option ${p&&p.conta===n?'selected':''}>${esc(n)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Data da Compra *</label><input type="date" id="p-dt" value="${p?p.data:hoje}" onchange="parcSyncPr();parcPreview()"></div>
+    <div class="fg"><label>Valor Total (R$) *</label><input type="number" id="p-vt" step="0.01" value="${p?p.total:''}" placeholder="0,00" oninput="parcPreview()"></div>
+    <div class="fg"><label>Nº de Parcelas *</label><input type="number" id="p-np" min="1" value="${p?p.np:''}" placeholder="Ex: 12" oninput="parcPreview()"></div>
+    <div class="fg"><label>Parcelas já pagas</label><input type="number" id="p-pg" min="0" value="${p?p.pg:0}"><div class="field-hint">Só para cadastrar compra antiga já em andamento</div></div>
+    <div class="fg full" id="p-preview-wrap" style="display:none"><div class="tip tip-blue" id="p-preview"></div></div>
+    <div class="fg full">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400"><input type="checkbox" id="p-pr-chk" style="width:auto" ${temPr?'checked':''} onchange="parcTogglePr()"> A 1ª parcela cai em data diferente da compra (raro)</label>
+      <div id="p-pr-wrap" style="${temPr?'':'display:none'};margin-top:6px"><input type="date" id="p-pr" value="${p?(p.primeira_data||p.data):hoje}" onchange="parcPreview()"><div class="field-hint">As demais parcelas seguem de mês em mês a partir desta data.</div></div>
+    </div>
+    <div class="fg full"><label>Observação</label><input type="text" id="p-ob" value="${esc(p?p.obs:'')}" placeholder="Opcional"></div>
+  </div>`,`<button class="btn btn-ghost" onclick="closeM()">Cancelar</button><button class="btn btn-ghost" onclick="saveParc(${eid||0},true)">${p?'Salvar e Duplicar':'+ Salvar e Novo'}</button><button class="btn btn-dark" onclick="saveParc(${eid||0})">${p?'Salvar':'Adicionar'}</button>`);
+  setTimeout(parcPreview,50);
+}
+function parcTogglePr(){
+  const chk=document.getElementById('p-pr-chk'),w=document.getElementById('p-pr-wrap');
+  if(w)w.style.display=chk&&chk.checked?'':'none';
+  if(!(chk&&chk.checked))parcSyncPr(true);
+  parcPreview();
+}
+function parcSyncPr(force){
+  const chk=document.getElementById('p-pr-chk');
+  if(force||!(chk&&chk.checked)){const pr=document.getElementById('p-pr'),dt=document.getElementById('p-dt');if(pr&&dt)pr.value=dt.value;}
+}
+function parcPreview(){
+  const wrap=document.getElementById('p-preview-wrap'),tip=document.getElementById('p-preview');
+  if(!wrap||!tip)return;
+  const vt=parseFloat(fv('p-vt'))||0,np=parseInt(fv('p-np'))||0,cn=fv('p-cn');
+  const chk=document.getElementById('p-pr-chk');
+  const pr=(chk&&chk.checked?fv('p-pr'):fv('p-dt'))||fv('p-dt');
+  if(!vt||!np||!pr){wrap.style.display='none';return;}
+  const vp=vt/np;
+  const ult=addMonths(pr,np-1);
+  const cartao=db.cartoes.find(x=>x.nome===cn);
+  let fatTxt='';
+  if(cartao){const f=faturaCartao(cn,pr);if(f)fatTxt=`<br>1ª parcela na fatura de <strong>${faturaLabelMes(cartao.id,f.mes)}</strong> (fecha ${fdt(f.fechamento)}, vence ${fdt(f.vencimento)})`;}
+  tip.innerHTML=`💳 <strong>${np}× de ${R(vp)}</strong> — última parcela em <strong>${fdt(ult)}</strong>.${fatTxt}`;
+  wrap.style.display='';
+}
+function saveParc(eid,andNew){const ds=fv('p-ds').trim(),ct=parseInt(fv('p-ct')),cn=fv('p-cn'),dt=fv('p-dt'),vt=parseFloat(fv('p-vt')),np=parseInt(fv('p-np')),pg=Math.min(parseInt(fv('p-pg'))||0,np||0),ob=fv('p-ob');const usePr=document.getElementById('p-pr-chk')&&document.getElementById('p-pr-chk').checked;const pr=usePr?(fv('p-pr')||dt):dt;if(!ds||!vt||!np||!dt){alert('Preencha os campos obrigatórios.');return}let p;if(eid){const i=db.parcelados.findIndex(x=>x.id===eid);db.parcelados[i]={...db.parcelados[i],desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};p=db.parcelados[i]}else{p={id:nid(db.parcelados),desc:ds,cat_id:ct,conta:cn,data:dt,primeira_data:pr,total:vt,np,pg,obs:ob};db.parcelados.push(p)}regenerateParcelLaunches(p);save();closeM();if(andNew)openParcModal();else pParc()}
 function delParc(id){if(!confirm('Excluir compra parcelada e suas parcelas lançadas?'))return;db.parcelados=db.parcelados.filter(p=>p.id!==id);db.lancamentos=db.lancamentos.filter(l=>!(l.origem==='parcelado'&&l.ref_id===id));save();pParc()}
 
 // ── DESPESAS FIXAS ──────────────────────────────────────────────────
