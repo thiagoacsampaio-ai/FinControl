@@ -260,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.4 ☁</span>
+    <span>v3.5 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -304,6 +304,14 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
     <div class="sb-item" onclick="go('faturas')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
       Faturas
+    </div>
+  </div>
+
+  <div class="sb-group">
+    <div class="sb-lbl">Empresa</div>
+    <div class="sb-item" onclick="go('pj')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+      Controle PJ
     </div>
   </div>
 
@@ -376,6 +384,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 // v3.4: Fixos com visão mensal (baixa rápida, barra sticky) + visão anual;
 // fixos pendentes não consomem limite do cartão (só após a baixa);
 // combobox de categoria com busca por nome (ignora emoji/acentos).
+// v3.5: módulo Controle PJ — receitas recebidas/a receber por contas PJ,
+// Fator R sobre RBT12 (Anexo III/V), DAS estimado e provisionável,
+// pró-labore com INSS/IRRF por tabelas editáveis (tela de Parâmetros).
 // ════════════════════════════════════════════════════════════════════
 const DB_DOC = 'shared/fincontrol'; // caminho único compartilhado no Firestore
 const ALLOWED_EMAILS = ['thiagoacsampaio@gmail.com', 'casorio.et@gmail.com']; // lista de e-mails com acesso permitido
@@ -516,7 +527,7 @@ function faturaLabelMes(cartaoId,mes){const d=getFaturaVencimento(cartaoId,mes);
 function tipoTag(t){if(t==='R') return '<span class="tag tag-g">Receita</span>'; if(t==='D') return '<span class="tag tag-r">Despesa</span>'; if(t==='I') return '<span class="tag tag-b">Investimento</span>'; if(t==='Res') return '<span class="tag tag-t">Resgate</span>'; if(t==='Tr') return '<span class="tag tag-x">Transferência</span>'; return '<span class="tag tag-x">'+esc(t)+'</span>'}
 function vClass(t,transfer_out){if(t==='Tr')return transfer_out?'v-neg':'v-pos';return isEntrada(t)?'v-pos':t==='I'?'v-neu':'v-neg'}
 function vSign(t,transfer_out){if(t==='Tr')return transfer_out?'-':'+';return isEntrada(t)?'+':t==='I'?'▸':'-'}
-function origemTag(l){if(l.origem==='fixo')return '<span class="tag tag-a txt-xs">fixo</span>'; if(l.origem==='parcelado')return '<span class="tag tag-p txt-xs">parcelado</span>'; if(l.origem==='provisao_fatura')return '<span class="tag tag-t txt-xs">💳 fatura</span>'; if(l.origem==='residual_fatura')return '<span class="tag tag-a txt-xs">↪ saldo anterior</span>'; return l.importado?'<span class="tag tag-b txt-xs">importado</span>':'<span class="tag tag-x txt-xs">manual</span>'}
+function origemTag(l){if(l.origem==='fixo')return '<span class="tag tag-a txt-xs">fixo</span>'; if(l.origem==='parcelado')return '<span class="tag tag-p txt-xs">parcelado</span>'; if(l.origem==='provisao_fatura')return '<span class="tag tag-t txt-xs">💳 fatura</span>'; if(l.origem==='residual_fatura')return '<span class="tag tag-a txt-xs">↪ saldo anterior</span>'; if(l.origem==='pj')return '<span class="tag tag-b txt-xs">🏢 PJ</span>'; return l.importado?'<span class="tag tag-b txt-xs">importado</span>':'<span class="tag tag-x txt-xs">manual</span>'}
 
 // ── CATEGORIA COMBOBOX (busca por nome; ignora emoji e acentos) ──────
 const _norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
@@ -592,6 +603,7 @@ function migrateDB(){db.faturas_pagas=db.faturas_pagas||[];db.cartoes=db.cartoes
   db.parcelados.forEach(p=>{if(!db.lancamentos.some(l=>l.origem==='parcelado'&&l.ref_id===p.id))regenerateParcelLaunches(p)});
   // Migra pagamento_fatura → provisao_fatura
   db.lancamentos.forEach(l=>{if(l.origem==='pagamento_fatura')l.origem='provisao_fatura';});
+  ensurePJDefaults();
   save();
 }
 // (migrateDB called in bootApp)
@@ -734,7 +746,7 @@ function regenerateParcelLaunches(p){db.lancamentos=db.lancamentos.filter(l=>!(l
 function rebuildParcelStatusFromLaunch(p){const ls=db.lancamentos.filter(l=>l.origem==='parcelado'&&l.ref_id===p.id);if(ls.length)p.pg=ls.filter(l=>l.pago!==false).length}
 
 // ── NAVIGATION ──────────────────────────────────────────────────────
-const PAGES = {painel:'Painel',lancamentos:'Lançamentos',importar:'Importar Extrato',parcelados:'Parcelados',fixos:'Lançamentos Fixos',contas:'Contas',cartoes:'Cartões',faturas:'Faturas',categorias:'Categorias',relatorio:'Relatório',usuarios:'Usuários'};
+const PAGES = {painel:'Painel',lancamentos:'Lançamentos',importar:'Importar Extrato',parcelados:'Parcelados',fixos:'Lançamentos Fixos',contas:'Contas',cartoes:'Cartões',faturas:'Faturas',pj:'Controle PJ',categorias:'Categorias',relatorio:'Relatório',usuarios:'Usuários'};
 let page='painel';
 let _searchTimer=null;
 function debounceSearch(val){
@@ -831,7 +843,7 @@ function refreshLancResults(){
       <div class="tbl-wrap">${sortableTable('lancamentos',['Data','Descrição','Categoria','Conta','Tipo','Valor','Status','Saldo conta/dia','Origem','Ações'],allRows,'Nenhum lançamento encontrado')}</div>
     </div>`;
 }
-function go(p){page=p;document.getElementById('sidebar').classList.remove('mob-open');document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('on',el.getAttribute('onclick')&&el.getAttribute('onclick').includes("'"+p+"'")));document.getElementById('tb-title').textContent=PAGES[p]||p;({painel:pPainel,lancamentos:pLanc,importar:pImport,parcelados:pParc,fixos:pFixos,contas:pContas,cartoes:pCartoes,faturas:pFaturas,categorias:pCats,relatorio:pRel,usuarios:pUsuarios}[p]||pPainel)()}
+function go(p){page=p;document.getElementById('sidebar').classList.remove('mob-open');document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('on',el.getAttribute('onclick')&&el.getAttribute('onclick').includes("'"+p+"'")));document.getElementById('tb-title').textContent=PAGES[p]||p;({painel:pPainel,lancamentos:pLanc,importar:pImport,parcelados:pParc,fixos:pFixos,contas:pContas,cartoes:pCartoes,faturas:pFaturas,pj:pPJ,categorias:pCats,relatorio:pRel,usuarios:pUsuarios}[p]||pPainel)()}
 
 // ── SORTABLE TABLE ───────────────────────────────────────────────────
 function sortableTable(id, headers, rows, empty='Nenhum registro encontrado'){
@@ -1726,6 +1738,304 @@ function saveFixo(eid,andNew){
 function toggleFixoAtivo(id){const f=db.fixos.find(x=>x.id===id);if(f){f.ativo=!f.ativo;save();pFixos()}}
 function delFixo(id){if(!confirm('Excluir lançamento fixo?'))return;db.fixos=db.fixos.filter(f=>f.id!==id);db.lancamentos=db.lancamentos.filter(l=>!(l.origem==='fixo'&&l.ref_id===id));save();pFixos()}
 
+// ════════════════════════════════════════════════════════════════════
+// CONTROLE PJ — Simples Nacional (Fator R), pró-labore, DAS
+// Valores padrão são referência (2025) e 100% editáveis em Parâmetros.
+// ════════════════════════════════════════════════════════════════════
+let _pjMes=new Date().toISOString().slice(0,7);
+
+function ensurePJDefaults(){
+  if(!db.pj)db.pj={};
+  const p=db.pj;
+  if(!p.contas)p.contas=db.contas.filter(c=>c.subtipo==='PJ').map(c=>c.nome);
+  if(!p.params)p.params={};
+  const pp=p.params;
+  if(pp.regime===undefined)pp.regime='competencia';   // competência | caixa
+  if(pp.fator_r_alvo===undefined)pp.fator_r_alvo=28;  // %
+  if(pp.das_dia===undefined)pp.das_dia=20;            // vencimento DAS (mês seguinte)
+  if(pp.salario_minimo===undefined)pp.salario_minimo=1518.00;
+  if(pp.inss_aliq===undefined)pp.inss_aliq=11;        // % contribuinte individual
+  if(pp.inss_teto===undefined)pp.inss_teto=8157.41;   // teto salário de contribuição
+  if(pp.dependentes===undefined)pp.dependentes=0;
+  if(pp.irrf_dep===undefined)pp.irrf_dep=189.59;      // dedução por dependente
+  if(pp.conta_pf===undefined)pp.conta_pf='';          // conta PF que recebe o líquido
+  if(!pp.taxas)pp.taxas=[];                           // [{nome,perc}] taxas extras s/ receita
+  if(!pp.irrf_faixas)pp.irrf_faixas=[                 // tabela mensal (ref. mai/2025)
+    {ate:2428.80,aliq:0,deduz:0},
+    {ate:2826.65,aliq:7.5,deduz:182.16},
+    {ate:3751.05,aliq:15,deduz:394.16},
+    {ate:4664.68,aliq:22.5,deduz:675.49},
+    {ate:0,aliq:27.5,deduz:908.73}];                  // ate=0 → sem limite
+  if(!pp.anexo3)pp.anexo3=[
+    {ate:180000,aliq:6,deduz:0},{ate:360000,aliq:11.2,deduz:9360},{ate:720000,aliq:13.5,deduz:17640},
+    {ate:1800000,aliq:16,deduz:35640},{ate:3600000,aliq:21,deduz:125640},{ate:4800000,aliq:33,deduz:648000}];
+  if(!pp.anexo5)pp.anexo5=[
+    {ate:180000,aliq:15.5,deduz:0},{ate:360000,aliq:18,deduz:4500},{ate:720000,aliq:19.5,deduz:9900},
+    {ate:1800000,aliq:20.5,deduz:17100},{ate:3600000,aliq:23,deduz:62100},{ate:4800000,aliq:30.5,deduz:540000}];
+}
+function pjContas(){ensurePJDefaults();return db.pj.contas.filter(n=>db.contas.some(c=>c.nome===n));}
+function mesLabel(mk){const [y,m]=mk.split('-').map(Number);const s=new Date(y,m-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});return s.charAt(0).toUpperCase()+s.slice(1);}
+function findOrCreateCat(nome,tipo,icone){let c=db.categorias.find(x=>x.nome===nome&&x.tipo===tipo);if(!c){c={id:nid(db.categorias),nome,tipo,icone:icone||(tipo==='D'?'🏢':'💼'),cor:'#374151',parent_id:null};db.categorias.push(c);}return c;}
+
+// ── Cálculos tributários (tudo parametrizado) ──
+function pjCalcINSS(bruto){const pp=db.pj.params;return Math.min(bruto,pp.inss_teto)*pp.inss_aliq/100;}
+function pjCalcIRRF(bruto,inss){const pp=db.pj.params;const base=Math.max(0,bruto-inss-pp.dependentes*pp.irrf_dep);
+  for(const f of pp.irrf_faixas){if(!f.ate||base<=f.ate)return Math.max(0,base*f.aliq/100-f.deduz);}
+  return 0;}
+function pjAliquotaEfetiva(tab,rbt){if(rbt<=0)return tab[0].aliq/100;const f=tab.find(x=>rbt<=x.ate)||tab[tab.length-1];return Math.max(0,(rbt*f.aliq/100-f.deduz)/rbt);}
+// RBT12: receita bruta dos 12 meses ANTERIORES ao mês de apuração
+function pjRBT12(mk){const contas=pjContas();let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R'&&l.pago!==false&&ym(l.data)===m).reduce((a,l)=>a+Number(l.valor||0),0);}return s;}
+// Folha 12m p/ Fator R = pró-labore BRUTO provisionado nos 12 meses anteriores
+function pjFolha12(mk){let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>l.pj_tipo==='prolabore'&&l.pj_mes===m).reduce((a,l)=>a+Number(l.pj_bruto||l.valor||0),0);}return s;}
+
+// Resumo consolidado do mês (fonte única para tela e provisionamentos)
+function pjResumo(mk){
+  ensurePJDefaults();
+  const pp=db.pj.params, contas=pjContas();
+  const recs=db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R'&&ym(l.data)===mk);
+  const recebido=recs.filter(l=>l.pago!==false).reduce((s,l)=>s+Number(l.valor||0),0);
+  const aReceber=recs.filter(l=>l.pago===false).reduce((s,l)=>s+Number(l.valor||0),0);
+  const receitaMes=pp.regime==='caixa'?recebido:recebido+aReceber;
+  const rbt=pjRBT12(mk), folha=pjFolha12(mk);
+  const plMesL=db.lancamentos.find(l=>l.pj_tipo==='prolabore'&&l.pj_mes===mk);
+  const folhaMes=plMesL?Number(plMesL.pj_bruto||plMesL.valor||0):0;
+  // Início de atividade (sem RBT12): usa a proporção do próprio mês
+  const fr=rbt>0?folha/rbt:(receitaMes>0?folhaMes/receitaMes:0);
+  const anexo=fr>=pp.fator_r_alvo/100?'III':'V';
+  const tab=anexo==='III'?pp.anexo3:pp.anexo5;
+  const rbtBase=rbt>0?rbt:receitaMes*12; // projeção p/ empresa nova
+  const aliq=pjAliquotaEfetiva(tab,rbtBase);
+  const das=receitaMes*aliq;
+  const taxas=pp.taxas.map(t=>({nome:t.nome,perc:t.perc,valor:receitaMes*t.perc/100}));
+  const taxasTot=taxas.reduce((s,t)=>s+t.valor,0);
+  const baseMensal=rbt>0?rbt/12:receitaMes;
+  const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
+  const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&(l.tipo==='D'||l.tipo==='I')&&ym(l.data)===mk);
+  const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
+  return {pp,contas,recs,recebido,aReceber,receitaMes,rbt,folha,fr,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
+}
+
+// ── Tela principal ──
+function pPJ(){
+  ensurePJDefaults();
+  const contas=pjContas();
+  if(!contas.length){
+    set(`<div class="empty"><big>🏢</big>Nenhuma conta vinculada ao Controle PJ.<br><span class="txt-xs">Vincule suas contas PJ em Parâmetros (contas com subtipo PJ são sugeridas automaticamente).</span><br><br><button class="btn btn-dark" onclick="openPJParams()">⚙ Abrir Parâmetros</button></div>`);
+    return;
+  }
+  const mk=_pjMes;
+  ensureFixedLaunchesForMonth(mk);
+  const [y,m]=mk.split('-').map(Number);
+  const prevMk=m===1?`${y-1}-12`:`${y}-${String(m-1).padStart(2,'0')}`;
+  const nextMk=m===12?`${y+1}-01`:`${y}-${String(m+1).padStart(2,'0')}`;
+  const r=pjResumo(mk);
+  const frPct=(r.fr*100).toFixed(1);
+  const frOk=r.fr>=r.pp.fator_r_alvo/100;
+  const inss=r.plMesL?pjCalcINSS(Number(r.plMesL.pj_bruto||0)):0;
+  const irrf=r.plMesL?pjCalcIRRF(Number(r.plMesL.pj_bruto||0),inss):0;
+
+  const rowR=l=>`<tr>
+    <td class="mono txt-xs">${fdt(l.data)}</td>
+    <td>${esc(l.desc)}</td>
+    <td>${esc(l.conta)}</td>
+    <td class="v-pos">+${R(l.valor)}</td>
+    <td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Recebido':'A receber'}</button></td>
+    <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>
+  </tr>`;
+  const rowD=l=>`<tr>
+    <td class="mono txt-xs">${fdt(l.data)}</td>
+    <td>${esc(l.desc)} ${origemTag(l)}</td>
+    <td>${esc(l.conta)}</td>
+    <td class="v-neg">-${R(l.valor)}</td>
+    <td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Pago':'Pendente'}</button></td>
+    <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>
+  </tr>`;
+  const recsSort=[...r.recs].sort((a,b)=>a.data<b.data?-1:1);
+  const despSort=[...r.despesas].sort((a,b)=>a.data<b.data?-1:1);
+
+  set(`
+  <div class="sticky-bar">
+    <div style="display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <button onclick="_pjMes='${prevMk}';pPJ()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)">‹</button>
+      <span style="padding:7px 16px;font-size:13px;font-weight:700;min-width:150px;text-align:center;border-left:1px solid var(--line);border-right:1px solid var(--line)">${mesLabel(mk)}</span>
+      <button onclick="_pjMes='${nextMk}';pPJ()" style="padding:7px 14px;border:none;background:transparent;cursor:pointer;font-size:16px;color:var(--ink2)">›</button>
+    </div>
+    ${mk!==new Date().toISOString().slice(0,7)?`<button class="btn btn-ghost btn-sm" onclick="_pjMes=new Date().toISOString().slice(0,7);pPJ()">Hoje</button>`:''}
+    <span class="txt-xs" style="color:var(--ink3)">${contas.map(esc).join(' · ')}</span>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="openPJParams()">⚙ Parâmetros</button>
+      <button class="btn btn-ghost btn-sm" onclick="openProlaboreModal()">💼 Pró-labore</button>
+      <button class="btn btn-ghost btn-sm" onclick="pjProvisionarDAS()">🧾 Provisionar DAS</button>
+      <button class="btn btn-green btn-sm" onclick="openPJReceita()">+ Recebimento</button>
+    </div>
+  </div>
+
+  <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
+    <div class="kpi c-g"><div class="kpi-lbl">Recebido no Mês</div><div class="kpi-val">${R(r.recebido)}</div></div>
+    <div class="kpi c-b"><div class="kpi-lbl">A Receber no Mês</div><div class="kpi-val">${R(r.aReceber)}</div></div>
+    <div class="kpi c-r"><div class="kpi-lbl">Despesas PJ no Mês</div><div class="kpi-val">${R(r.despTot)}</div></div>
+    <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">receita (${r.pp.regime==='caixa'?'caixa':'competência'}) − despesas</div></div>
+  </div>
+  <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
+    <div class="kpi c-t"><div class="kpi-lbl">RBT12</div><div class="kpi-val">${R(r.rbt)}</div><div class="kpi-sub">receita bruta 12 meses anteriores</div></div>
+    <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}</div></div>
+    <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">Simples Nacional — Anexo ${r.anexo}</div></div>
+    <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaMes)}`}</div></div>
+  </div>
+
+  ${!frOk&&r.receitaMes+r.rbt>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Fator R em ${frPct}% — abaixo do alvo de ${r.pp.fator_r_alvo}%. Pró-labore sugerido: <strong>${R(r.sugerido)}/mês</strong> para enquadrar no Anexo III (alíquota inicial 6%). <button class="btn btn-xs btn-dark" onclick="openProlaboreModal()">Provisionar pró-labore</button></div>`:''}
+  ${r.plMesL?`<div class="tip tip-green" style="margin-bottom:16px">💼 Pró-labore de ${mesLabel(mk)}: bruto <strong>${R(r.plMesL.pj_bruto)}</strong> → INSS ${R(inss)} · IRRF ${R(irrf)} · líquido <strong>${R((r.plMesL.pj_bruto||0)-inss-irrf)}</strong></div>`:''}
+
+  <div class="two">
+    <div class="card">
+      <div class="card-head"><h3>Recebimentos — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">${r.recs.length} item(ns)</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
+        ${recsSort.length?recsSort.map(rowR).join(''):'<tr><td colspan="6"><div class="empty" style="padding:24px"><big>💼</big>Nenhum recebimento neste mês</div></td></tr>'}
+      </tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Despesas PJ — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">inclui fixos, DAS e pró-labore</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
+        ${despSort.length?despSort.map(rowD).join(''):'<tr><td colspan="6"><div class="empty" style="padding:24px"><big>🏢</big>Nenhuma despesa neste mês<br><span class="txt-xs">Dica: cadastre despesas recorrentes (escritório, contador...) em Lançamentos Fixos usando a conta PJ</span></div></td></tr>'}
+      </tbody></table></div>
+    </div>
+  </div>
+  <div class="tip tip-blue" style="margin-top:16px">ℹ Os valores de impostos são <strong>estimativas</strong> a partir dos parâmetros configurados — confira as tabelas vigentes com seu contador. Recebimentos e despesas daqui são lançamentos normais das contas PJ (aparecem também em Lançamentos e Relatórios).</div>`);
+}
+
+// Novo recebimento com conta PJ e tipo Receita pré-selecionados
+function openPJReceita(){
+  const contas=pjContas();
+  openLancModal();
+  setTimeout(()=>{
+    const tp=document.getElementById('f-tp');
+    if(tp){tp.value='R';lancTipoChange('R');}
+    const cn=document.getElementById('f-cn');
+    if(cn&&contas.length){for(let o of cn.options){if(o.value===contas[0]||o.text===contas[0]){o.selected=true;break;}}}
+    const pg=document.getElementById('f-pg');
+    if(pg)pg.value='false'; // padrão: a receber
+  },80);
+}
+
+// ── Provisionar DAS (+ taxas extras) ──
+function pjProvisionarDAS(){
+  const mk=_pjMes;
+  const r=pjResumo(mk);
+  if(r.das<=0){alert('Sem receita no mês — nada a provisionar.');return;}
+  const venc=(()=>{const n=addMonths(mk+'-01',1).slice(0,7);return n+'-'+String(Math.min(r.pp.das_dia,monthEnd(n))).padStart(2,'0');})();
+  const txt=`DAS ${mesLabel(mk)}: ${R(r.das)} (${(r.aliq*100).toFixed(2)}% × ${R(r.receitaMes)}, Anexo ${r.anexo})${r.taxas.length?'\n'+r.taxas.map(t=>`${t.nome}: ${R(t.valor)}`).join('\n'):''}\nVencimento: ${fdt(venc)}\n\nProvisionar como despesa pendente na conta ${r.contas[0]}?`;
+  if(!confirm(txt))return;
+  const cat=findOrCreateCat('Impostos e Taxas PJ','D','🧾');
+  const upsert=(pjTipo,desc,valor)=>{
+    let l=db.lancamentos.find(x=>x.pj_tipo===pjTipo&&x.pj_mes===mk);
+    if(l){l.valor=valor;l.data=venc;l.desc=desc;}
+    else db.lancamentos.push({id:nid(db.lancamentos),data:venc,desc,tipo:'D',cat_id:cat.id,conta:r.contas[0],valor,obs:`Provisão automática Controle PJ (ref. ${mk})`,importado:false,pago:false,origem:'pj',pj_tipo:pjTipo,pj_mes:mk});
+  };
+  upsert('das',`DAS Simples Nacional (ref. ${mesLabel(mk)})`,Math.round(r.das*100)/100);
+  r.taxas.forEach(t=>{if(t.valor>0)upsert('taxa:'+t.nome,`${t.nome} (ref. ${mesLabel(mk)})`,Math.round(t.valor*100)/100);});
+  save();pPJ();
+}
+
+// ── Pró-labore ──
+function openProlaboreModal(){
+  const mk=_pjMes;
+  const r=pjResumo(mk);
+  const bruto=r.plMesL?Number(r.plMesL.pj_bruto||r.plMesL.valor):Math.round(r.sugerido*100)/100;
+  const contasOpts=r.contas.map(n=>`<option>${esc(n)}</option>`).join('');
+  showM(`Pró-labore — ${mesLabel(mk)}`,'modal-lg',`
+    <div class="fgrid">
+      <div class="fg full"><div class="tip tip-blue">Fator R atual: <strong>${(r.fr*100).toFixed(1)}%</strong> (alvo ${r.pp.fator_r_alvo}%). Sugerido: <strong>${R(r.sugerido)}</strong> = maior entre o salário mínimo (${R(r.pp.salario_minimo)}) e ${r.pp.fator_r_alvo}% da média mensal da receita.</div></div>
+      <div class="fg"><label>Valor Bruto (R$) *</label><input type="number" id="pl-bruto" step="0.01" value="${bruto.toFixed(2)}" oninput="plPreview()"></div>
+      <div class="fg"><label>Conta PJ de Débito *</label><select id="pl-conta">${contasOpts}</select></div>
+      <div class="fg full"><div class="tip tip-green" id="pl-prev"></div></div>
+      <div class="fg full"><div class="field-hint">Serão criados lançamentos pendentes: <strong>líquido</strong> no fim do mês${r.pp.conta_pf?` (+ receita espelho na conta <strong>${esc(r.pp.conta_pf)}</strong>)`:' (defina uma conta PF em Parâmetros para gerar a receita espelho)'}; <strong>INSS (GPS)</strong> dia 15 e <strong>IRRF (DARF)</strong> dia 20 do mês seguinte. Reprovisonar substitui os lançamentos do mês.</div></div>
+    </div>`,
+  `<button class="btn btn-ghost" onclick="closeM()">Cancelar</button>
+   <button class="btn btn-dark" onclick="pjSalvarProlabore()">✓ Provisionar</button>`);
+  setTimeout(plPreview,50);
+}
+function plPreview(){
+  const el=document.getElementById('pl-prev');if(!el)return;
+  const b=parseFloat(fv('pl-bruto'))||0;
+  const inss=pjCalcINSS(b),irrf=pjCalcIRRF(b,inss),liq=b-inss-irrf;
+  el.innerHTML=`Bruto ${R(b)} − INSS ${R(inss)} (${db.pj.params.inss_aliq}%, teto ${R(db.pj.params.inss_teto)}) − IRRF ${R(irrf)} = <strong>líquido ${R(liq)}</strong>`;
+}
+function pjSalvarProlabore(){
+  const mk=_pjMes;ensurePJDefaults();
+  const pp=db.pj.params;
+  const b=parseFloat(fv('pl-bruto')),cn=fv('pl-conta');
+  if(!b||b<=0||!cn){alert('Informe o valor bruto e a conta.');return;}
+  const inss=Math.round(pjCalcINSS(b)*100)/100;
+  const irrf=Math.round(pjCalcIRRF(b,inss)*100)/100;
+  const liq=Math.round((b-inss-irrf)*100)/100;
+  // substitui provisões do mês
+  db.lancamentos=db.lancamentos.filter(l=>!(l.pj_mes===mk&&['prolabore','pl_inss','pl_irrf','prolabore_pf'].includes(l.pj_tipo)));
+  const catPL=findOrCreateCat('Pró-labore','D','💼');
+  const fimMes=mk+'-'+String(monthEnd(mk)).padStart(2,'0');
+  const prox=addMonths(mk+'-01',1).slice(0,7);
+  const d15=prox+'-'+String(Math.min(15,monthEnd(prox))).padStart(2,'0');
+  const d20=prox+'-'+String(Math.min(20,monthEnd(prox))).padStart(2,'0');
+  db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)} (líquido)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:liq,obs:`Bruto ${R(b)} · Provisão Controle PJ`,importado:false,pago:false,origem:'pj',pj_tipo:'prolabore',pj_mes:mk,pj_bruto:b});
+  if(inss>0)db.lancamentos.push({id:nid(db.lancamentos),data:d15,desc:`INSS Pró-labore ${mesLabel(mk)} (GPS)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:inss,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'pl_inss',pj_mes:mk});
+  if(irrf>0)db.lancamentos.push({id:nid(db.lancamentos),data:d20,desc:`IRRF Pró-labore ${mesLabel(mk)} (DARF)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:irrf,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'pl_irrf',pj_mes:mk});
+  if(pp.conta_pf&&db.contas.some(c=>c.nome===pp.conta_pf)){
+    const catR=findOrCreateCat('Pró-labore','R','💼');
+    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)}`,tipo:'R',cat_id:catR.id,conta:pp.conta_pf,valor:liq,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'prolabore_pf',pj_mes:mk});
+  }
+  save();closeM();pPJ();
+}
+
+// ── Parâmetros ──
+function openPJParams(){
+  ensurePJDefaults();
+  const pp=db.pj.params;
+  const tbl=(pref,rows)=>`<div class="tbl-wrap"><table style="font-size:12px"><thead><tr><th>Até (R$) — vazio = sem limite</th><th>Alíquota %</th><th>Dedução (R$)</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><input id="${pref}-${i}-ate" type="number" step="0.01" value="${r.ate||''}" placeholder="∞" style="width:130px"></td><td><input id="${pref}-${i}-aliq" type="number" step="0.01" value="${r.aliq}" style="width:80px"></td><td><input id="${pref}-${i}-ded" type="number" step="0.01" value="${r.deduz}" style="width:110px"></td></tr>`).join('')}</tbody></table></div>`;
+  const contasChk=db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<label style="display:inline-flex;align-items:center;gap:5px;font-weight:400;margin-right:12px"><input type="checkbox" id="pj-cta-${c.id}" style="width:auto" ${db.pj.contas.includes(c.nome)?'checked':''}> ${esc(c.nome)}${c.subtipo==='PJ'?' <span class="tag tag-a" style="font-size:9px">PJ</span>':''}</label>`).join('');
+  const contaPFOpts=['<option value="">— Não gerar receita espelho —</option>',...db.contas.filter(c=>c.ativo&&!db.pj.contas.includes(c.nome)).sort(cmpName).map(c=>`<option ${pp.conta_pf===c.nome?'selected':''}>${esc(c.nome)}</option>`)].join('');
+  showM('Parâmetros do Controle PJ','modal-xl',`
+    <div class="fgrid">
+      <div class="fg full"><div class="tip tip-amber">⚠ Os valores abaixo são referência e mudam por lei — <strong>confira com seu contador</strong> e atualize aqui quando houver reajuste (salário mínimo, teto INSS, tabela IRRF, anexos do Simples).</div></div>
+      <div class="fg full"><label>Contas da empresa (PJ)</label><div style="padding:8px 0">${contasChk}</div></div>
+      <div class="fg"><label>Regime de apuração da receita</label><select id="pj-regime"><option value="competencia" ${pp.regime!=='caixa'?'selected':''}>Competência (recebidos + a receber)</option><option value="caixa" ${pp.regime==='caixa'?'selected':''}>Caixa (somente recebidos)</option></select></div>
+      <div class="fg"><label>Conta PF que recebe o pró-labore líquido</label><select id="pj-conta-pf">${contaPFOpts}</select></div>
+      <div class="fg-lbl">Simples Nacional / Fator R</div>
+      <div class="fg"><label>Fator R alvo (%)</label><input type="number" id="pj-fr" step="0.1" value="${pp.fator_r_alvo}"><div class="field-hint">≥ este % → Anexo III; abaixo → Anexo V</div></div>
+      <div class="fg"><label>Dia de vencimento do DAS</label><input type="number" id="pj-dia-das" min="1" max="28" value="${pp.das_dia}"></div>
+      <div class="fg full"><label>Anexo III — faixas (RBT12)</label>${tbl('pj-a3',pp.anexo3)}</div>
+      <div class="fg full"><label>Anexo V — faixas (RBT12)</label>${tbl('pj-a5',pp.anexo5)}</div>
+      <div class="fg-lbl">Pró-labore — INSS e IRRF</div>
+      <div class="fg"><label>Salário mínimo (R$)</label><input type="number" id="pj-salmin" step="0.01" value="${pp.salario_minimo}"></div>
+      <div class="fg"><label>INSS — alíquota (%)</label><input type="number" id="pj-inss-aliq" step="0.1" value="${pp.inss_aliq}"></div>
+      <div class="fg"><label>INSS — teto de contribuição (R$)</label><input type="number" id="pj-inss-teto" step="0.01" value="${pp.inss_teto}"></div>
+      <div class="fg"><label>Nº de dependentes (IRRF)</label><input type="number" id="pj-dep" min="0" value="${pp.dependentes}"></div>
+      <div class="fg"><label>Dedução por dependente (R$)</label><input type="number" id="pj-dep-val" step="0.01" value="${pp.irrf_dep}"></div>
+      <div class="fg full"><label>Tabela IRRF mensal</label>${tbl('pj-ir',pp.irrf_faixas)}</div>
+      <div class="fg full"><label>Taxas extras sobre a receita (uma por linha: Nome;percentual)</label><textarea id="pj-taxas" rows="2" placeholder="Ex.: Taxa da plataforma;1,5">${esc(pp.taxas.map(t=>`${t.nome};${t.perc}`).join('\n'))}</textarea></div>
+    </div>`,
+  `<button class="btn btn-ghost" onclick="closeM()">Cancelar</button>
+   <button class="btn btn-dark" onclick="savePJParams()">✓ Salvar Parâmetros</button>`);
+}
+function savePJParams(){
+  ensurePJDefaults();
+  const pp=db.pj.params;
+  db.pj.contas=db.contas.filter(c=>document.getElementById('pj-cta-'+c.id)?.checked).map(c=>c.nome);
+  pp.regime=fv('pj-regime')||'competencia';
+  pp.conta_pf=fv('pj-conta-pf')||'';
+  pp.fator_r_alvo=parseFloat(fv('pj-fr'))||28;
+  pp.das_dia=parseInt(fv('pj-dia-das'))||20;
+  pp.salario_minimo=parseFloat(fv('pj-salmin'))||pp.salario_minimo;
+  pp.inss_aliq=parseFloat(fv('pj-inss-aliq'))||pp.inss_aliq;
+  pp.inss_teto=parseFloat(fv('pj-inss-teto'))||pp.inss_teto;
+  pp.dependentes=parseInt(fv('pj-dep'))||0;
+  pp.irrf_dep=parseFloat(fv('pj-dep-val'))||pp.irrf_dep;
+  const rd=(pref,arr)=>arr.map((r,i)=>({ate:parseFloat(fv(`${pref}-${i}-ate`))||0,aliq:parseFloat(fv(`${pref}-${i}-aliq`))||0,deduz:parseFloat(fv(`${pref}-${i}-ded`))||0}));
+  pp.anexo3=rd('pj-a3',pp.anexo3);
+  pp.anexo5=rd('pj-a5',pp.anexo5);
+  pp.irrf_faixas=rd('pj-ir',pp.irrf_faixas);
+  pp.taxas=fv('pj-taxas').split('\n').map(s=>s.trim()).filter(Boolean).map(s=>{const[nome,perc]=s.split(';');return{nome:(nome||'').trim(),perc:parseFloat(String(perc||'').replace(',','.'))||0};}).filter(t=>t.nome&&t.perc>0);
+  save();closeM();pPJ();
+}
+
 // ── CONTAS ───────────────────────────────────────────────────────────
 function pContas(){const total=db.contas.filter(c=>c.ativo).reduce((s,c)=>s+saldoConta(c.nome),0);
   const rows=sortedContas().map(c=>{
@@ -2589,6 +2899,7 @@ function migrateDB_quiet(){
   db.fixos.forEach(f=>{if(!f.meses)f.meses={};f.valor=Number(f.valor||0);if(f.repetir_meses===undefined)f.repetir_meses=0;if(!f.data_inicio)f.data_inicio=new Date().toISOString().slice(0,10);if(!f.frequencia)f.frequencia='mensal';if(!f.tipo)f.tipo='D';});
   db.parcelados.forEach(p=>{if(!db.lancamentos.some(l=>l.origem==='parcelado'&&l.ref_id===p.id))regenerateParcelLaunches(p)});
   db.lancamentos.forEach(l=>{if(l.origem==='pagamento_fatura')l.origem='provisao_fatura';});
+  ensurePJDefaults();
   sanitizeDB(); // limpa órfãos
 }
 
