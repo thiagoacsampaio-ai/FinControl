@@ -260,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.6 ☁</span>
+    <span>v3.7 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -1755,6 +1755,7 @@ function ensurePJDefaults(){
   if(!p.params)p.params={};
   const pp=p.params;
   if(pp.base===undefined)pp.base='auto'; // auto: usa NF se houver notas | nf | receb
+  if(pp.fr_base===undefined)pp.fr_base='anterior'; // anterior: folha 12m anteriores (regra CGSN) | corrente: inclui o mês atual
   if(pp.regime===undefined)pp.regime='competencia';   // competência | caixa
   if(pp.fator_r_alvo===undefined)pp.fator_r_alvo=28;  // %
   if(pp.das_dia===undefined)pp.das_dia=20;            // vencimento DAS (mês seguinte)
@@ -1798,8 +1799,16 @@ function pjNFVinculado(n){return (n.lanc_ids||[]).reduce((s,id)=>{const l=db.lan
 function pjRBT12(mk){
   if(pjUsaNF()){let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.pj.notas.filter(n=>ym(n.data_emissao)===m).reduce((a,n)=>a+Number(n.valor||0),0);}return s;}
   const contas=pjContas();let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R'&&l.pago!==false&&ym(l.data)===m).reduce((a,l)=>a+Number(l.valor||0),0);}return s;}
-// Folha 12m p/ Fator R = pró-labore BRUTO provisionado nos 12 meses anteriores
-function pjFolha12(mk){let s=0;for(let i=1;i<=12;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>l.pj_tipo==='prolabore'&&l.pj_mes===m).reduce((a,l)=>a+Number(l.pj_bruto||l.valor||0),0);}return s;}
+// Folha p/ Fator R = pró-labore BRUTO provisionado.
+// Janela conforme parâmetro: 'anterior' = 12 meses anteriores (regra CGSN);
+// 'corrente' = mês atual + 11 anteriores (o pró-labore do mês conta na hora).
+function pjFolha12(mk){
+  const inc=db.pj&&db.pj.params&&db.pj.params.fr_base==='corrente';
+  const ini=inc?0:1, fim=inc?11:12;
+  let s=0;
+  for(let i=ini;i<=fim;i++){const m=addMonths(mk+'-01',-i).slice(0,7);s+=db.lancamentos.filter(l=>l.pj_tipo==='prolabore'&&l.pj_mes===m).reduce((a,l)=>a+Number(l.pj_bruto||l.valor||0),0);}
+  return s;
+}
 
 // Resumo consolidado do mês (fonte única para tela e provisionamentos)
 function pjResumo(mk){
@@ -1819,6 +1828,11 @@ function pjResumo(mk){
   const folhaMes=plMesL?Number(plMesL.pj_bruto||plMesL.valor||0):0;
   // Início de atividade (sem RBT12): usa a proporção do próprio mês
   const fr=rbt>0?folha/rbt:(receitaFiscal>0?folhaMes/receitaFiscal:0);
+  // Projeção do próximo mês: o pró-labore/receita DESTE mês já entram na janela
+  const proxMk=addMonths(mk+'-01',1).slice(0,7);
+  let folhaProx=0;for(let i=1;i<=12;i++){const m=addMonths(proxMk+'-01',-i).slice(0,7);folhaProx+=db.lancamentos.filter(l=>l.pj_tipo==='prolabore'&&l.pj_mes===m).reduce((a,l)=>a+Number(l.pj_bruto||l.valor||0),0);}
+  const rbtProx=pjRBT12(proxMk);
+  const frProj=rbtProx>0?folhaProx/rbtProx:fr;
   const anexo=fr>=pp.fator_r_alvo/100?'III':'V';
   const tab=anexo==='III'?pp.anexo3:pp.anexo5;
   const rbtBase=rbt>0?rbt:receitaFiscal*12; // projeção p/ empresa nova
@@ -1830,7 +1844,7 @@ function pjResumo(mk){
   const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
   const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&(l.tipo==='D'||l.tipo==='I')&&ym(l.data)===mk);
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,folha,fr,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
 }
 
 // ── Tela principal ──
@@ -1898,13 +1912,14 @@ function pPJ(){
   </div>
   <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
     <div class="kpi c-t"><div class="kpi-lbl">RBT12</div><div class="kpi-val">${R(r.rbt)}</div><div class="kpi-sub">receita bruta 12 meses anteriores</div></div>
-    <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}</div></div>
+    <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}${r.pp.fr_base!=='corrente'&&Math.abs(r.frProj-r.fr)>0.001?`<br>projetado ${mesLabel(r.proxMk).split(' ')[0]}: <strong>${(r.frProj*100).toFixed(1)}%</strong>`:''}</div></div>
     <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">Simples Nacional — Anexo ${r.anexo}</div></div>
     <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaFiscal)}${r.usaNF?' em NF':''}`}</div></div>
   </div>
 
   ${r.usaNF&&!r.notasMes.length&&(r.recebido+r.aReceber)>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Há recebimentos neste mês mas <strong>nenhuma NF emitida</strong> — os impostos estão calculados sobre R$ 0,00. <button class="btn btn-xs btn-dark" onclick="openNFModal()">Registrar NF</button></div>`:''}
-  ${!frOk&&r.receitaFiscal+r.rbt>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Fator R em ${frPct}% — abaixo do alvo de ${r.pp.fator_r_alvo}%. Pró-labore sugerido: <strong>${R(r.sugerido)}/mês</strong> para enquadrar no Anexo III (alíquota inicial 6%). <button class="btn btn-xs btn-dark" onclick="openProlaboreModal()">Provisionar pró-labore</button></div>`:''}
+  ${!frOk&&r.plMesL&&r.pp.fr_base!=='corrente'?`<div class="tip tip-blue" style="margin-bottom:16px">ℹ O pró-labore de ${mesLabel(mk)} <strong>ainda não entra</strong> no Fator R deste mês: pela regra do Simples (CGSN 140), a folha considerada é a dos <strong>12 meses anteriores</strong> à apuração. Ele passa a contar em <strong>${mesLabel(r.proxMk)}</strong> (Fator R projetado: <strong>${(r.frProj*100).toFixed(1)}%</strong>${r.frProj>=r.pp.fator_r_alvo/100?' → Anexo III ✓':''}). Se o seu contador apura considerando o mês corrente, mude a janela em <a href="#" onclick="openPJParams();return false" style="color:inherit;font-weight:700">Parâmetros</a>.</div>`:''}
+  ${!frOk&&r.receitaFiscal+r.rbt>0?`<div class="tip tip-amber" style="margin-bottom:16px">⚠ Fator R em ${frPct}% — abaixo do alvo de ${r.pp.fator_r_alvo}%. Pró-labore sugerido: <strong>${R(r.sugerido)}/mês</strong> para enquadrar no Anexo III (alíquota inicial 6%). ${r.plMesL?'':'<button class="btn btn-xs btn-dark" onclick="openProlaboreModal()">Provisionar pró-labore</button>'}</div>`:''}
   ${r.plMesL?`<div class="tip tip-green" style="margin-bottom:16px">💼 Pró-labore de ${mesLabel(mk)}: bruto <strong>${R(r.plMesL.pj_bruto)}</strong> → INSS ${R(inss)} · IRRF ${R(irrf)} · líquido <strong>${R((r.plMesL.pj_bruto||0)-inss-irrf)}</strong></div>`:''}
 
   ${r.usaNF||r.notasMes.length?`<div class="card" style="margin-bottom:16px">
@@ -2039,6 +2054,7 @@ function openProlaboreModal(){
       <div class="fg full"><div class="tip tip-blue">Fator R atual: <strong>${(r.fr*100).toFixed(1)}%</strong> (alvo ${r.pp.fator_r_alvo}%). Sugerido: <strong>${R(r.sugerido)}</strong> = maior entre o salário mínimo (${R(r.pp.salario_minimo)}) e ${r.pp.fator_r_alvo}% da média mensal da receita.</div></div>
       <div class="fg"><label>Valor Bruto (R$) *</label><input type="number" id="pl-bruto" step="0.01" value="${bruto.toFixed(2)}" oninput="plPreview()"></div>
       <div class="fg"><label>Conta PJ de Débito *</label><select id="pl-conta">${contasOpts}</select></div>
+      <div class="fg full"><label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400"><input type="checkbox" id="pl-pago" style="width:auto" ${mk<new Date().toISOString().slice(0,7)?'checked':''}> Já pago (cadastro de mês passado — os lançamentos entram como pagos)</label></div>
       <div class="fg full"><div class="tip tip-green" id="pl-prev"></div></div>
       <div class="fg full"><div class="field-hint">Serão criados lançamentos pendentes: <strong>líquido</strong> no fim do mês${r.pp.conta_pf?` (+ receita espelho na conta <strong>${esc(r.pp.conta_pf)}</strong>)`:' (defina uma conta PF em Parâmetros para gerar a receita espelho)'}; <strong>INSS (GPS)</strong> dia 15 e <strong>IRRF (DARF)</strong> dia 20 do mês seguinte. Reprovisonar substitui os lançamentos do mês.</div></div>
     </div>`,
@@ -2060,6 +2076,7 @@ function pjSalvarProlabore(){
   const inss=Math.round(pjCalcINSS(b)*100)/100;
   const irrf=Math.round(pjCalcIRRF(b,inss)*100)/100;
   const liq=Math.round((b-inss-irrf)*100)/100;
+  const jaPago=!!document.getElementById('pl-pago')?.checked;
   // substitui provisões do mês
   db.lancamentos=db.lancamentos.filter(l=>!(l.pj_mes===mk&&['prolabore','pl_inss','pl_irrf','prolabore_pf'].includes(l.pj_tipo)));
   const catPL=findOrCreateCat('Pró-labore','D','💼');
@@ -2067,12 +2084,12 @@ function pjSalvarProlabore(){
   const prox=addMonths(mk+'-01',1).slice(0,7);
   const d15=prox+'-'+String(Math.min(15,monthEnd(prox))).padStart(2,'0');
   const d20=prox+'-'+String(Math.min(20,monthEnd(prox))).padStart(2,'0');
-  db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)} (líquido)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:liq,obs:`Bruto ${R(b)} · Provisão Controle PJ`,importado:false,pago:false,origem:'pj',pj_tipo:'prolabore',pj_mes:mk,pj_bruto:b});
-  if(inss>0)db.lancamentos.push({id:nid(db.lancamentos),data:d15,desc:`INSS Pró-labore ${mesLabel(mk)} (GPS)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:inss,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'pl_inss',pj_mes:mk});
-  if(irrf>0)db.lancamentos.push({id:nid(db.lancamentos),data:d20,desc:`IRRF Pró-labore ${mesLabel(mk)} (DARF)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:irrf,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'pl_irrf',pj_mes:mk});
+  db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)} (líquido)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:liq,obs:`Bruto ${R(b)} · Provisão Controle PJ`,importado:false,pago:jaPago,origem:'pj',pj_tipo:'prolabore',pj_mes:mk,pj_bruto:b});
+  if(inss>0)db.lancamentos.push({id:nid(db.lancamentos),data:d15,desc:`INSS Pró-labore ${mesLabel(mk)} (GPS)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:inss,obs:'Provisão Controle PJ',importado:false,pago:jaPago,origem:'pj',pj_tipo:'pl_inss',pj_mes:mk});
+  if(irrf>0)db.lancamentos.push({id:nid(db.lancamentos),data:d20,desc:`IRRF Pró-labore ${mesLabel(mk)} (DARF)`,tipo:'D',cat_id:catPL.id,conta:cn,valor:irrf,obs:'Provisão Controle PJ',importado:false,pago:jaPago,origem:'pj',pj_tipo:'pl_irrf',pj_mes:mk});
   if(pp.conta_pf&&db.contas.some(c=>c.nome===pp.conta_pf)){
     const catR=findOrCreateCat('Pró-labore','R','💼');
-    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)}`,tipo:'R',cat_id:catR.id,conta:pp.conta_pf,valor:liq,obs:'Provisão Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:'prolabore_pf',pj_mes:mk});
+    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Pró-labore ${mesLabel(mk)}`,tipo:'R',cat_id:catR.id,conta:pp.conta_pf,valor:liq,obs:'Provisão Controle PJ',importado:false,pago:jaPago,origem:'pj',pj_tipo:'prolabore_pf',pj_mes:mk});
   }
   save();closeM();pPJ();
 }
@@ -2093,6 +2110,7 @@ function openPJParams(){
       <div class="fg"><label>Conta PF que recebe o pró-labore líquido</label><select id="pj-conta-pf">${contaPFOpts}</select></div>
       <div class="fg-lbl">Simples Nacional / Fator R</div>
       <div class="fg"><label>Fator R alvo (%)</label><input type="number" id="pj-fr" step="0.1" value="${pp.fator_r_alvo}"><div class="field-hint">≥ este % → Anexo III; abaixo → Anexo V</div></div>
+      <div class="fg"><label>Janela da folha no Fator R</label><select id="pj-frbase"><option value="anterior" ${pp.fr_base!=='corrente'?'selected':''}>12 meses anteriores (regra CGSN)</option><option value="corrente" ${pp.fr_base==='corrente'?'selected':''}>Mês corrente + 11 anteriores</option></select><div class="field-hint">Na regra oficial, o pró-labore do mês só conta a partir do mês seguinte</div></div>
       <div class="fg"><label>Dia de vencimento do DAS</label><input type="number" id="pj-dia-das" min="1" max="28" value="${pp.das_dia}"></div>
       <div class="fg full"><label>Anexo III — faixas (RBT12)</label>${tbl('pj-a3',pp.anexo3)}</div>
       <div class="fg full"><label>Anexo V — faixas (RBT12)</label>${tbl('pj-a5',pp.anexo5)}</div>
@@ -2116,6 +2134,7 @@ function savePJParams(){
   pp.regime=fv('pj-regime')||'competencia';
   pp.conta_pf=fv('pj-conta-pf')||'';
   pp.fator_r_alvo=parseFloat(fv('pj-fr'))||28;
+  pp.fr_base=fv('pj-frbase')||'anterior';
   pp.das_dia=parseInt(fv('pj-dia-das'))||20;
   pp.salario_minimo=parseFloat(fv('pj-salmin'))||pp.salario_minimo;
   pp.inss_aliq=parseFloat(fv('pj-inss-aliq'))||pp.inss_aliq;
