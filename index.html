@@ -260,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.7 ☁</span>
+    <span>v3.8 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -1756,6 +1756,7 @@ function ensurePJDefaults(){
   const pp=p.params;
   if(pp.base===undefined)pp.base='auto'; // auto: usa NF se houver notas | nf | receb
   if(pp.fr_base===undefined)pp.fr_base='anterior'; // anterior: folha 12m anteriores (regra CGSN) | corrente: inclui o mês atual
+  if(pp.inicio===undefined)pp.inicio=''; // YYYY-MM do início de atividade ('' = detecta pela 1ª NF/receita)
   if(pp.regime===undefined)pp.regime='competencia';   // competência | caixa
   if(pp.fator_r_alvo===undefined)pp.fator_r_alvo=28;  // %
   if(pp.das_dia===undefined)pp.das_dia=20;            // vencimento DAS (mês seguinte)
@@ -1794,6 +1795,14 @@ function pjUsaNF(){ensurePJDefaults();const b=db.pj.params.base||'auto';return b
 function pjNotasMes(mk){ensurePJDefaults();return db.pj.notas.filter(n=>ym(n.data_emissao)===mk).sort((a,b)=>a.data_emissao<b.data_emissao?-1:1);}
 function pjNFRecebido(n){return (n.lanc_ids||[]).reduce((s,id)=>{const l=db.lancamentos.find(x=>x.id===id);return s+(l&&l.pago!==false?Number(l.valor||0):0);},0);}
 function pjNFVinculado(n){return (n.lanc_ids||[]).reduce((s,id)=>{const l=db.lancamentos.find(x=>x.id===id);return s+(l?Number(l.valor||0):0);},0);}
+// Início de atividade: mês configurado ou o da 1ª NF/receita registrada
+function pjInicioAtividade(){
+  ensurePJDefaults();
+  if(db.pj.params.inicio)return db.pj.params.inicio;
+  const contas=pjContas();
+  const meses=[...db.pj.notas.map(n=>ym(n.data_emissao)),...db.lancamentos.filter(l=>contas.includes(l.conta)&&l.tipo==='R').map(l=>ym(l.data))].filter(Boolean).sort();
+  return meses[0]||null;
+}
 // RBT12: receita bruta dos 12 meses ANTERIORES ao mês de apuração
 // Base NF: soma das notas emitidas; senão, recebimentos efetivados
 function pjRBT12(mk){
@@ -1835,16 +1844,22 @@ function pjResumo(mk){
   const frProj=rbtProx>0?folhaProx/rbtProx:fr;
   const anexo=fr>=pp.fator_r_alvo/100?'III':'V';
   const tab=anexo==='III'?pp.anexo3:pp.anexo5;
-  const rbtBase=rbt>0?rbt:receitaFiscal*12; // projeção p/ empresa nova
+  // Início de atividade (CGSN 140, art. 21): nos 12 primeiros meses a RBT12 é
+  // proporcionalizada — média mensal da receita acumulada × 12; no 1º mês,
+  // a receita do próprio mês × 12.
+  const inicio=pjInicioAtividade();
+  const mesesHist=inicio?(()=>{const[iy,im]=inicio.split('-').map(Number);const[my,mm]=mk.split('-').map(Number);return Math.max(0,Math.min(12,(my-iy)*12+(mm-im)));})():12;
+  const emInicio=!!inicio&&mesesHist<12;
+  const rbtBase=emInicio?(mesesHist>0?(rbt/mesesHist)*12:receitaFiscal*12):(rbt>0?rbt:receitaFiscal*12);
   const aliq=pjAliquotaEfetiva(tab,rbtBase);
   const das=receitaFiscal*aliq;
   const taxas=pp.taxas.map(t=>({nome:t.nome,perc:t.perc,valor:receitaFiscal*t.perc/100}));
   const taxasTot=taxas.reduce((s,t)=>s+t.valor,0);
-  const baseMensal=rbt>0?rbt/12:receitaFiscal;
+  const baseMensal=emInicio?(mesesHist>0?rbt/mesesHist:receitaFiscal):(rbt>0?rbt/12:receitaFiscal);
   const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
   const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&(l.tipo==='D'||l.tipo==='I')&&ym(l.data)===mk);
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
 }
 
 // ── Tela principal ──
@@ -1911,7 +1926,7 @@ function pPJ(){
     <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">caixa: recebido + a receber − despesas</div></div>
   </div>
   <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
-    <div class="kpi c-t"><div class="kpi-lbl">RBT12</div><div class="kpi-val">${R(r.rbt)}</div><div class="kpi-sub">receita bruta 12 meses anteriores</div></div>
+    <div class="kpi c-t"><div class="kpi-lbl">${r.emInicio?'RBT12 Proporcional':'RBT12'}</div><div class="kpi-val">${R(r.rbtBase)}</div><div class="kpi-sub">${r.emInicio?`início de atividade (${mesLabel(r.inicio)}) — ${r.mesesHist>0?`média de ${r.mesesHist} mês(es) × 12`:'receita do mês × 12'}`:'receita bruta 12 meses anteriores'}</div></div>
     <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}${r.pp.fr_base!=='corrente'&&Math.abs(r.frProj-r.fr)>0.001?`<br>projetado ${mesLabel(r.proxMk).split(' ')[0]}: <strong>${(r.frProj*100).toFixed(1)}%</strong>`:''}</div></div>
     <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">Simples Nacional — Anexo ${r.anexo}</div></div>
     <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaFiscal)}${r.usaNF?' em NF':''}`}</div></div>
@@ -2111,6 +2126,7 @@ function openPJParams(){
       <div class="fg-lbl">Simples Nacional / Fator R</div>
       <div class="fg"><label>Fator R alvo (%)</label><input type="number" id="pj-fr" step="0.1" value="${pp.fator_r_alvo}"><div class="field-hint">≥ este % → Anexo III; abaixo → Anexo V</div></div>
       <div class="fg"><label>Janela da folha no Fator R</label><select id="pj-frbase"><option value="anterior" ${pp.fr_base!=='corrente'?'selected':''}>12 meses anteriores (regra CGSN)</option><option value="corrente" ${pp.fr_base==='corrente'?'selected':''}>Mês corrente + 11 anteriores</option></select><div class="field-hint">Na regra oficial, o pró-labore do mês só conta a partir do mês seguinte</div></div>
+      <div class="fg"><label>Início da atividade (mês)</label><input type="month" id="pj-inicio" value="${pp.inicio||''}"><div class="field-hint">Vazio = detecta pela 1ª NF/receita. Nos 12 primeiros meses a RBT12 é proporcionalizada (média × 12)</div></div>
       <div class="fg"><label>Dia de vencimento do DAS</label><input type="number" id="pj-dia-das" min="1" max="28" value="${pp.das_dia}"></div>
       <div class="fg full"><label>Anexo III — faixas (RBT12)</label>${tbl('pj-a3',pp.anexo3)}</div>
       <div class="fg full"><label>Anexo V — faixas (RBT12)</label>${tbl('pj-a5',pp.anexo5)}</div>
@@ -2135,6 +2151,7 @@ function savePJParams(){
   pp.conta_pf=fv('pj-conta-pf')||'';
   pp.fator_r_alvo=parseFloat(fv('pj-fr'))||28;
   pp.fr_base=fv('pj-frbase')||'anterior';
+  pp.inicio=fv('pj-inicio')||'';
   pp.das_dia=parseInt(fv('pj-dia-das'))||20;
   pp.salario_minimo=parseFloat(fv('pj-salmin'))||pp.salario_minimo;
   pp.inss_aliq=parseFloat(fv('pj-inss-aliq'))||pp.inss_aliq;
