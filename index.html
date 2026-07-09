@@ -1960,16 +1960,34 @@ function pPJ(){
 
   <div class="two">
     <div class="card">
-      <div class="card-head"><h3>Recebimentos — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">${r.recs.length} item(ns)</span></div>
+      <div class="card-head"><h3>Recebimentos — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">${r.recs.length} item(ns) · total <strong class="v-pos">${R(r.recebido+r.aReceber)}</strong></span></div>
       <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
         ${recsSort.length?recsSort.map(rowR).join(''):'<tr><td colspan="6"><div class="empty" style="padding:24px"><big>💼</big>Nenhum recebimento neste mês</div></td></tr>'}
+        ${recsSort.length?`<tr><td colspan="3" style="background:var(--line2);font-weight:700">Total de Receitas</td><td class="v-pos fw7" style="background:var(--line2)">+${R(r.recebido+r.aReceber)}</td><td colspan="2" style="background:var(--line2)" class="txt-xs">recebido ${R(r.recebido)} · a receber ${R(r.aReceber)}</td></tr>`:''}
       </tbody></table></div>
     </div>
     <div class="card">
-      <div class="card-head"><h3>Despesas PJ — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">inclui fixos, DAS e pró-labore</span></div>
+      <div class="card-head"><h3>Despesas PJ — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">${r.despesas.length} item(ns) · total <strong class="v-neg">${R(r.despTot)}</strong></span></div>
       <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
         ${despSort.length?despSort.map(rowD).join(''):'<tr><td colspan="6"><div class="empty" style="padding:24px"><big>🏢</big>Nenhuma despesa neste mês<br><span class="txt-xs">Dica: cadastre despesas recorrentes (escritório, contador...) em Lançamentos Fixos usando a conta PJ</span></div></td></tr>'}
+        ${despSort.length?`<tr><td colspan="3" style="background:var(--line2);font-weight:700">Total de Despesas</td><td class="v-neg fw7" style="background:var(--line2)">-${R(r.despTot)}</td><td colspan="2" style="background:var(--line2)" class="txt-xs">pago ${R(r.despesas.filter(l=>l.pago!==false).reduce((s,l)=>s+Number(l.valor||0),0))} · pendente ${R(r.despesas.filter(l=>l.pago===false).reduce((s,l)=>s+Number(l.valor||0),0))}</td></tr>`:''}
       </tbody></table></div>
+    </div>
+  </div>
+
+  <!-- Líquido do mês -->
+  <div class="card" style="margin-top:16px">
+    <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;font-size:14px">
+        <span>Receitas <strong class="v-pos" style="font-size:16px">${R(r.recebido+r.aReceber)}</strong></span>
+        <span style="color:var(--ink3)">−</span>
+        <span>Despesas <strong class="v-neg" style="font-size:16px">${R(r.despTot)}</strong></span>
+        <span style="color:var(--ink3)">=</span>
+      </div>
+      <div style="text-align:right">
+        <div class="kpi-lbl">Líquido de ${mesLabel(mk)}</div>
+        <div class="kpi-val" style="font-size:26px;color:${(r.recebido+r.aReceber-r.despTot)>=0?'var(--green)':'var(--red)'}">${R(r.recebido+r.aReceber-r.despTot)}</div>
+      </div>
     </div>
   </div>
   <div class="tip tip-blue" style="margin-top:16px">ℹ Os valores de impostos são <strong>estimativas</strong> a partir dos parâmetros configurados — confira as tabelas vigentes com seu contador. Recebimentos e despesas daqui são lançamentos normais das contas PJ (aparecem também em Lançamentos e Relatórios).</div>`);
