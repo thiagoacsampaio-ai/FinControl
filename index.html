@@ -260,7 +260,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="sb-brand">
     <img src="favicon.svg" alt="FinControl" width="32" height="32" style="border-radius:7px;display:block">
     <h1>FinControl</h1>
-    <span>v3.8 ☁</span>
+    <span>v3.9 ☁</span>
   </div>
 
   <div class="sb-group">
@@ -1767,6 +1767,7 @@ function ensurePJDefaults(){
   if(pp.irrf_dep===undefined)pp.irrf_dep=189.59;      // dedução por dependente
   if(pp.conta_pf===undefined)pp.conta_pf='';          // conta PF que recebe o líquido
   if(!pp.taxas)pp.taxas=[];                           // [{nome,perc}] taxas extras s/ receita
+  if(!pp.inv)pp.inv={p13:8.33,ferias:11.11,fgts:8,base:'nf',conta_destino:''}; // reservas sugeridas (% sobre NF bruta)
   if(!pp.irrf_faixas)pp.irrf_faixas=[                 // tabela mensal (ref. mai/2025)
     {ate:2428.80,aliq:0,deduz:0},
     {ate:2826.65,aliq:7.5,deduz:182.16},
@@ -1859,7 +1860,56 @@ function pjResumo(mk){
   const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
   const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&(l.tipo==='D'||l.tipo==='I')&&ym(l.data)===mk);
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot};
+  // Reservas sugeridas (proteção estilo CLT) — % sobre a base escolhida (NF bruta ou pró-labore)
+  const baseInv=pp.inv.base==='prolabore'?folhaMes:receitaFiscal;
+  const reservas=[
+    {key:'inv_13',nome:'13º salário',det:'1/12 avos',pct:pp.inv.p13,valor:baseInv*pp.inv.p13/100},
+    {key:'inv_ferias',nome:'Férias',det:'1/12 + 1/3',pct:pp.inv.ferias,valor:baseInv*pp.inv.ferias/100},
+    {key:'inv_fgts',nome:'Reserva de segurança',det:'estilo FGTS',pct:pp.inv.fgts,valor:baseInv*pp.inv.fgts/100}
+  ];
+  const reservasTot=reservas.reduce((s,x)=>s+x.valor,0);
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,reservas,reservasTot};
+}
+
+// ── Reservas sugeridas: provisionar / efetivar / remover ──
+function pjReservaLanc(key,mk){return db.lancamentos.find(l=>l.pj_tipo===key&&l.pj_mes===mk&&(l.tipo!=='Tr'||l.transfer_out===true));}
+function pjProvisionarReserva(key,silencioso){
+  const mk=_pjMes;ensurePJDefaults();
+  const r=pjResumo(mk);
+  const res=r.reservas.find(x=>x.key===key);
+  if(!res||!r.contas.length)return;
+  const valor=Math.round(res.valor*100)/100;
+  if(valor<=0){if(!silencioso)alert('Valor sugerido zerado — verifique a base (NF do mês).');return;}
+  const fimMes=mk+'-'+String(monthEnd(mk)).padStart(2,'0');
+  db.lancamentos=db.lancamentos.filter(l=>!(l.pj_tipo===key&&l.pj_mes===mk));
+  const dest=r.pp.inv.conta_destino&&db.contas.some(c=>c.nome===r.pp.inv.conta_destino)?r.pp.inv.conta_destino:null;
+  const desc=`Reserva ${res.nome} — ${mesLabel(mk)}`;
+  if(dest){
+    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc,tipo:'Tr',conta:r.contas[0],valor,obs:'Sugestão de investimento Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:key,pj_mes:mk,transfer_out:true});
+    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc,tipo:'Tr',conta:dest,valor,obs:'Sugestão de investimento Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:key,pj_mes:mk,transfer_out:false});
+  } else {
+    const cat=findOrCreateCat('Reservas e Investimentos PJ','D','💰');
+    db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc,tipo:'I',cat_id:cat.id,conta:r.contas[0],valor,obs:'Sugestão de investimento Controle PJ',importado:false,pago:false,origem:'pj',pj_tipo:key,pj_mes:mk});
+  }
+  if(!silencioso){save();pPJ();}
+}
+function pjProvisionarReservasTodas(){
+  const r=pjResumo(_pjMes);
+  r.reservas.forEach(x=>{if(!pjReservaLanc(x.key,_pjMes)&&x.valor>0)pjProvisionarReserva(x.key,true);});
+  save();pPJ();
+}
+function pjEfetivarReserva(key){
+  const mk=_pjMes;
+  const ls=db.lancamentos.filter(l=>l.pj_tipo===key&&l.pj_mes===mk);
+  if(!ls.length)return;
+  const novo=ls[0].pago===false;
+  ls.forEach(l=>{l.pago=novo});
+  save();pPJ();
+}
+function pjRemoverReserva(key){
+  if(!confirm('Remover esta provisão de reserva?'))return;
+  db.lancamentos=db.lancamentos.filter(l=>!(l.pj_tipo===key&&l.pj_mes===_pjMes));
+  save();pPJ();
 }
 
 // ── Tela principal ──
@@ -1955,6 +2005,29 @@ function pPJ(){
           <td>${st}</td>
           <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openNFModal(${n.id})" title="Editar / vincular recebimentos">✏️</button><button class="ico-btn" onclick="delNF(${n.id})">🗑</button></div></td>
         </tr>`;}).join(''):'<tr><td colspan="8"><div class="empty" style="padding:24px"><big>📄</big>Nenhuma NF emitida neste mês</div></td></tr>'}
+    </tbody></table></div>
+  </div>`:''}
+
+  ${r.baseInv>0||r.reservas.some(x=>pjReservaLanc(x.key,mk))?`<div class="card" style="margin-bottom:16px">
+    <div class="card-head"><h3>💰 Reservas Sugeridas — proteção estilo CLT</h3><div style="display:flex;align-items:center;gap:10px"><span class="txt-xs" style="color:var(--ink3)">base: ${r.pp.inv.base==='prolabore'?'pró-labore bruto':'NF bruta do mês'} (${R(r.baseInv)})${r.pp.inv.conta_destino?` → ${esc(r.pp.inv.conta_destino)}`:''}</span>${r.reservas.some(x=>!pjReservaLanc(x.key,mk)&&x.valor>0)?`<button class="btn btn-xs btn-dark" onclick="pjProvisionarReservasTodas()">Provisionar todas</button>`:''}</div></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Reserva</th><th>Regra</th><th>%</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
+      ${r.reservas.map(x=>{
+        const l=pjReservaLanc(x.key,mk);
+        const efet=l&&l.pago!==false;
+        const st=!l?'<span class="tag tag-x">Sugestão</span>':efet?'<span class="tag tag-g">✓ Efetivada</span>':'<span class="tag tag-a">Provisionada</span>';
+        const difere=l&&Math.abs(Number(l.valor)-Math.round(x.valor*100)/100)>0.005;
+        const acoes=!l
+          ?(x.valor>0?`<button class="btn btn-xs btn-dark" onclick="pjProvisionarReserva('${x.key}')">Provisionar</button>`:'<span class="txt-xs" style="color:var(--ink3)">sem base</span>')
+          :`<div style="display:flex;gap:3px">${difere?`<button class="btn btn-xs btn-ghost" title="Recalcular pelo valor sugerido" onclick="pjProvisionarReserva('${x.key}')">↺ ${R(x.valor)}</button>`:''}<button class="btn btn-xs ${efet?'btn-ghost':'btn-green'}" onclick="pjEfetivarReserva('${x.key}')">${efet?'↩ Reabrir':'✓ Efetivar'}</button><button class="ico-btn" onclick="pjRemoverReserva('${x.key}')">🗑</button></div>`;
+        return `<tr>
+          <td><strong>${x.nome}</strong></td>
+          <td class="txt-xs" style="color:var(--ink3)">${x.det}</td>
+          <td class="mono txt-xs">${x.pct}%</td>
+          <td class="v-neu fw7">${R(l?l.valor:x.valor)}${difere?`<br><span class="txt-xs" style="color:var(--amber)">sugerido: ${R(x.valor)}</span>`:''}</td>
+          <td>${st}</td>
+          <td>${acoes}</td>
+        </tr>`;}).join('')}
+      <tr><td colspan="3" style="background:var(--line2);font-weight:700">Total sugerido no mês</td><td class="v-neu fw7" style="background:var(--line2)">${R(r.reservasTot)}</td><td colspan="2" style="background:var(--line2)" class="txt-xs">provisione e marque ✓ Efetivar quando fizer a aplicação de verdade</td></tr>
     </tbody></table></div>
   </div>`:''}
 
@@ -2155,6 +2228,12 @@ function openPJParams(){
       <div class="fg"><label>Nº de dependentes (IRRF)</label><input type="number" id="pj-dep" min="0" value="${pp.dependentes}"></div>
       <div class="fg"><label>Dedução por dependente (R$)</label><input type="number" id="pj-dep-val" step="0.01" value="${pp.irrf_dep}"></div>
       <div class="fg full"><label>Tabela IRRF mensal</label>${tbl('pj-ir',pp.irrf_faixas)}</div>
+      <div class="fg-lbl">Reservas / Investimentos sugeridos</div>
+      <div class="fg"><label>13º salário (% da base)</label><input type="number" id="pj-inv-13" step="0.01" value="${pp.inv.p13}"><div class="field-hint">1/12 avos ≈ 8,33%</div></div>
+      <div class="fg"><label>Férias (% da base)</label><input type="number" id="pj-inv-fer" step="0.01" value="${pp.inv.ferias}"><div class="field-hint">1/12 + 1/3 ≈ 11,11%</div></div>
+      <div class="fg"><label>Longo prazo / segurança (%)</label><input type="number" id="pj-inv-fgts" step="0.01" value="${pp.inv.fgts}"><div class="field-hint">estilo FGTS: 8%</div></div>
+      <div class="fg"><label>Base das reservas</label><select id="pj-inv-base"><option value="nf" ${pp.inv.base!=='prolabore'?'selected':''}>NF bruta do mês</option><option value="prolabore" ${pp.inv.base==='prolabore'?'selected':''}>Pró-labore bruto do mês</option></select></div>
+      <div class="fg full"><label>Conta de investimento destino (opcional)</label><select id="pj-inv-conta"><option value="">— Lançar como Investimento na própria conta PJ —</option>${db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<option ${pp.inv.conta_destino===c.nome?'selected':''}>${esc(c.nome)}${c.tipo==='Investimento'?' 📈':''}</option>`).join('')}</select><div class="field-hint">Com destino definido, provisionar gera uma transferência conta PJ → investimento</div></div>
       <div class="fg full"><label>Taxas extras sobre a receita (uma por linha: Nome;percentual)</label><textarea id="pj-taxas" rows="2" placeholder="Ex.: Taxa da plataforma;1,5">${esc(pp.taxas.map(t=>`${t.nome};${t.perc}`).join('\n'))}</textarea></div>
     </div>`,
   `<button class="btn btn-ghost" onclick="closeM()">Cancelar</button>
@@ -2180,6 +2259,7 @@ function savePJParams(){
   pp.anexo3=rd('pj-a3',pp.anexo3);
   pp.anexo5=rd('pj-a5',pp.anexo5);
   pp.irrf_faixas=rd('pj-ir',pp.irrf_faixas);
+  pp.inv={p13:parseFloat(fv('pj-inv-13'))||0,ferias:parseFloat(fv('pj-inv-fer'))||0,fgts:parseFloat(fv('pj-inv-fgts'))||0,base:fv('pj-inv-base')||'nf',conta_destino:fv('pj-inv-conta')||''};
   pp.taxas=fv('pj-taxas').split('\n').map(s=>s.trim()).filter(Boolean).map(s=>{const[nome,perc]=s.split(';');return{nome:(nome||'').trim(),perc:parseFloat(String(perc||'').replace(',','.'))||0};}).filter(t=>t.nome&&t.perc>0);
   save();closeM();pPJ();
 }
