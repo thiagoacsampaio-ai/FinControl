@@ -632,6 +632,21 @@ function getSubMonthlyDates(f,mk){
   }
   return dates;
 }
+function _daysBetween(a,b){if(!a||!b)return Infinity;return Math.abs(Math.round((new Date(a+'T12:00')-new Date(b+'T12:00'))/86400000));}
+// Adota o lançamento sub-mensal mais adequado para o slot `data` (tolerância em dias),
+// preferindo lançamentos já editados/pagos manualmente. Usado p/ casar ocorrências movidas.
+function _adoptFixoOcc(cands,data,tol,used){
+  let best=null,bs=-Infinity;
+  for(const x of cands){
+    if(used.has(x.id))continue;
+    if(x.occ_data!=null)continue;
+    const d=_daysBetween(x.data,data);
+    if(d>tol)continue;
+    const s=(x._editado_manual?1000:0)+(x.pago?500:0)+(tol-d);
+    if(s>bs){bs=s;best=x;}
+  }
+  return best;
+}
 function ensureFixedLaunchesForMonth(mk){
   let changed=false;
   db.fixos.filter(f=>f.ativo).forEach(f=>{
@@ -646,26 +661,46 @@ function ensureFixedLaunchesForMonth(mk){
       }
       const startMk=(f.data_inicio||mk+'-01').slice(0,7);
       if(mk<startMk)return;
-      getSubMonthlyDates(f,mk).forEach(data=>{
-        let l=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data);
-        if(!l){
-          if(f.tipo==='Tr'){
-            let lo=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===true);
-            let li=db.lancamentos.find(x=>x.origem==='fixo'&&x.ref_id===f.id&&x.data===data&&x.transfer_out===false);
-            if(!lo){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:true});changed=true;}
-            else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
-            if(!li&&f.conta_destino){db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:false});changed=true;}
-            else if(li&&!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
-          } else {
-            db.lancamentos.push({id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id});
-            changed=true;
+      // occ_data = identidade da ocorrência (data agendada original). Permite antecipar/adiar
+      // o pagamento (mudar x.data) sem gerar duplicata. `tol` casa lançamentos movidos.
+      const interval=freq==='diario'?1:freq==='semanal'?7:15;
+      const tol=Math.max(1,Math.floor(interval/2));
+      // pool inclui lançamentos cuja data OU cuja occ_data cai neste mês (cobre movimentações entre meses)
+      const poolAll=db.lancamentos.filter(x=>x.origem==='fixo'&&x.ref_id===f.id&&(ym(x.data)===mk||(x.occ_data&&ym(x.occ_data)===mk)));
+      if(f.tipo==='Tr'){
+        const poolO=poolAll.filter(x=>x.transfer_out===true),poolI=poolAll.filter(x=>x.transfer_out===false);
+        const usedO=new Set(),usedI=new Set();
+        getSubMonthlyDates(f,mk).forEach(data=>{
+          let lo=poolO.find(x=>x.occ_data===data&&!usedO.has(x.id));
+          if(!lo){lo=_adoptFixoOcc(poolO,data,tol,usedO);if(lo){lo.occ_data=data;changed=true;}}
+          if(!lo){lo={id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:true,occ_data:data};db.lancamentos.push(lo);poolO.push(lo);changed=true;}
+          else if(!lo._editado_manual&&lo.desc!==f.desc){lo.desc=f.desc;changed=true;}
+          usedO.add(lo.id);
+          if(f.conta_destino){
+            let li=poolI.find(x=>x.occ_data===data&&!usedI.has(x.id));
+            if(!li){li=_adoptFixoOcc(poolI,data,tol,usedI);if(li){li.occ_data=data;changed=true;}}
+            if(!li){li={id:nid(db.lancamentos),data,desc:f.desc,tipo:'Tr',conta:f.conta_destino,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,transfer_out:false,occ_data:data};db.lancamentos.push(li);poolI.push(li);changed=true;}
+            else if(!li._editado_manual&&li.desc!==f.desc){li.desc=f.desc;changed=true;}
+            usedI.add(li.id);
           }
-        } else {
-          let ch2=false;
-          if(!l._editado_manual){if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}}
-          if(ch2)changed=true;
-        }
-      });
+        });
+        // limpa duplicatas antigas: pendentes auto-geradas que não casaram com nenhum slot
+        const staleIds=new Set(poolO.filter(x=>!usedO.has(x.id)&&x.occ_data==null&&x.pago===false&&!x._editado_manual).map(x=>x.id));
+        poolI.filter(x=>!usedI.has(x.id)&&x.occ_data==null&&x.pago===false&&!x._editado_manual).forEach(x=>staleIds.add(x.id));
+        if(staleIds.size){db.lancamentos=db.lancamentos.filter(x=>!staleIds.has(x.id));changed=true;}
+      } else {
+        const used=new Set();
+        getSubMonthlyDates(f,mk).forEach(data=>{
+          let l=poolAll.find(x=>x.occ_data===data&&!used.has(x.id));
+          if(!l){l=_adoptFixoOcc(poolAll,data,tol,used);if(l){l.occ_data=data;changed=true;}}
+          if(!l){l={id:nid(db.lancamentos),data,desc:f.desc,tipo:f.tipo||'D',cat_id:f.cat_id,conta:f.conta,valor:f.valor,obs:'lançamento fixo',importado:false,pago:false,origem:'fixo',ref_id:f.id,occ_data:data};db.lancamentos.push(l);poolAll.push(l);changed=true;}
+          else if(!l._editado_manual){let ch2=false;if(l.desc!==f.desc){l.desc=f.desc;ch2=true;}if(l.cat_id!==f.cat_id){l.cat_id=f.cat_id;ch2=true;}if(l.conta!==f.conta){l.conta=f.conta;ch2=true;}if(ch2)changed=true;}
+          used.add(l.id);
+        });
+        // limpa duplicatas antigas: pendentes auto-geradas que não casaram com nenhum slot
+        const staleIds=new Set(poolAll.filter(x=>!used.has(x.id)&&x.occ_data==null&&x.pago===false&&!x._editado_manual).map(x=>x.id));
+        if(staleIds.size){db.lancamentos=db.lancamentos.filter(x=>!staleIds.has(x.id));changed=true;}
+      }
     } else {
       const interval=getFreqInterval(freq);
       const dataIni=(f.data_inicio||mk+'-01').slice(0,7);
