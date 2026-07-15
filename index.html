@@ -1900,6 +1900,7 @@ function ensurePJDefaults(){
   if(pp.irrf_dep===undefined)pp.irrf_dep=189.59;      // dedução por dependente
   if(pp.conta_pf===undefined)pp.conta_pf='';          // conta PF que recebe o líquido
   if(!pp.taxas)pp.taxas=[];                           // [{nome,perc}] taxas extras s/ receita
+  if(pp.aliq_manual===undefined)pp.aliq_manual=0;     // % — >0 força a alíquota (ignora cálculo)
   if(!pp.inv)pp.inv={p13:8.33,ferias:11.11,fgts:8,base:'nf',conta_destino:''}; // reservas sugeridas (% sobre NF bruta)
   if(!pp.irrf_faixas)pp.irrf_faixas=[                 // tabela mensal (ref. mai/2025)
     {ate:2428.80,aliq:0,deduz:0},
@@ -1985,7 +1986,8 @@ function pjResumo(mk){
   const mesesHist=inicio?(()=>{const[iy,im]=inicio.split('-').map(Number);const[my,mm]=mk.split('-').map(Number);return Math.max(0,Math.min(12,(my-iy)*12+(mm-im)));})():12;
   const emInicio=!!inicio&&mesesHist<12;
   const rbtBase=emInicio?(mesesHist>0?(rbt/mesesHist)*12:receitaFiscal*12):(rbt>0?rbt:receitaFiscal*12);
-  const aliq=pjAliquotaEfetiva(tab,rbtBase);
+  const aliqManual=Number(pp.aliq_manual)>0;
+  const aliq=aliqManual?Number(pp.aliq_manual)/100:pjAliquotaEfetiva(tab,rbtBase);
   const das=receitaFiscal*aliq;
   const taxas=pp.taxas.map(t=>({nome:t.nome,perc:t.perc,valor:receitaFiscal*t.perc/100}));
   const taxasTot=taxas.reduce((s,t)=>s+t.valor,0);
@@ -2001,7 +2003,7 @@ function pjResumo(mk){
     {key:'inv_fgts',nome:'Reserva de segurança',det:'estilo FGTS',pct:pp.inv.fgts,valor:baseInv*pp.inv.fgts/100}
   ];
   const reservasTot=reservas.reduce((s,x)=>s+x.valor,0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,reservas,reservasTot};
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,aliqManual,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,reservas,reservasTot};
 }
 
 // ── Reservas sugeridas: provisionar / efetivar / remover ──
@@ -2111,7 +2113,7 @@ function pPJ(){
   <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
     <div class="kpi c-t"><div class="kpi-lbl">${r.emInicio?'RBT12 Proporcional':'RBT12'}</div><div class="kpi-val">${R(r.rbtBase)}</div><div class="kpi-sub">${r.emInicio?`início de atividade (${mesLabel(r.inicio)}) — ${r.mesesHist>0?`média de ${r.mesesHist} mês(es) × 12`:'receita do mês × 12'}`:'receita bruta 12 meses anteriores'}</div></div>
     <div class="kpi ${frOk?'c-g':'c-r'}"><div class="kpi-lbl">Fator R</div><div class="kpi-val">${frPct}%</div><div class="kpi-sub">${frOk?`✓ Anexo III (alvo ${r.pp.fator_r_alvo}%)`:`⚠ Abaixo de ${r.pp.fator_r_alvo}% → Anexo V`}${r.pp.fr_base!=='corrente'&&Math.abs(r.frProj-r.fr)>0.001?`<br>projetado ${mesLabel(r.proxMk).split(' ')[0]}: <strong>${(r.frProj*100).toFixed(1)}%</strong>`:''}</div></div>
-    <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">Simples Nacional — Anexo ${r.anexo}</div></div>
+    <div class="kpi c-p"><div class="kpi-lbl">Alíquota Efetiva</div><div class="kpi-val">${(r.aliq*100).toFixed(2)}%</div><div class="kpi-sub">${r.aliqManual?'✎ fixada manualmente nos Parâmetros':`Simples Nacional — Anexo ${r.anexo}`}</div></div>
     <div class="kpi c-a"><div class="kpi-lbl">DAS Estimado</div><div class="kpi-val">${R(r.das)}</div><div class="kpi-sub">${r.taxasTot?`+ ${R(r.taxasTot)} em taxas`:`sobre ${R(r.receitaFiscal)}${r.usaNF?' em NF':''}`}</div></div>
   </div>
 
@@ -2352,6 +2354,7 @@ function openPJParams(){
       <div class="fg"><label>Janela da folha no Fator R</label><select id="pj-frbase"><option value="anterior" ${pp.fr_base!=='corrente'?'selected':''}>12 meses anteriores (regra CGSN)</option><option value="corrente" ${pp.fr_base==='corrente'?'selected':''}>Mês corrente + 11 anteriores</option></select><div class="field-hint">Na regra oficial, o pró-labore do mês só conta a partir do mês seguinte</div></div>
       <div class="fg"><label>Início da atividade (mês)</label><input type="month" id="pj-inicio" value="${pp.inicio||''}"><div class="field-hint">Vazio = detecta pela 1ª NF/receita. Nos 12 primeiros meses a RBT12 é proporcionalizada (média × 12)</div></div>
       <div class="fg"><label>Dia de vencimento do DAS</label><input type="number" id="pj-dia-das" min="1" max="28" value="${pp.das_dia}"></div>
+      <div class="fg"><label>Forçar alíquota efetiva (%)</label><input type="number" id="pj-aliq-manual" step="0.01" min="0" value="${pp.aliq_manual||''}" placeholder="vazio = calcular automaticamente"><div class="field-hint">Use o % informado pela contabilidade (ex.: 6). Ignora RBT12/Fator R no cálculo do DAS</div></div>
       <div class="fg full"><label>Anexo III — faixas (RBT12)</label>${tbl('pj-a3',pp.anexo3)}</div>
       <div class="fg full"><label>Anexo V — faixas (RBT12)</label>${tbl('pj-a5',pp.anexo5)}</div>
       <div class="fg-lbl">Pró-labore — INSS e IRRF</div>
@@ -2383,6 +2386,7 @@ function savePJParams(){
   pp.fr_base=fv('pj-frbase')||'anterior';
   pp.inicio=fv('pj-inicio')||'';
   pp.das_dia=parseInt(fv('pj-dia-das'))||20;
+  pp.aliq_manual=parseFloat(fv('pj-aliq-manual'))||0;
   pp.salario_minimo=parseFloat(fv('pj-salmin'))||pp.salario_minimo;
   pp.inss_aliq=parseFloat(fv('pj-inss-aliq'))||pp.inss_aliq;
   pp.inss_teto=parseFloat(fv('pj-inss-teto'))||pp.inss_teto;
