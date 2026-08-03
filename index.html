@@ -395,7 +395,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 // v3.7: reservas com conta PJ de origem e conta de DESTINO por reserva —
 // provisionar gera transferência real (saída na PJ + entrada no destino);
 // pró-labore: líquido vira transferência conta PJ → conta PF e os encargos
-// viram uma guia única DCTFWeb (INSS retido + IRRF + outros encargos).
+// viram uma guia única DCTFWeb (INSS retido + IRRF + outros encargos);
+// base de reservas pode ser a NF menos impostos; e distribuição de lucros
+// estimada (sobra da apuração) transferível para uma conta corrente.
 // ════════════════════════════════════════════════════════════════════
 const DB_DOC = 'shared/fincontrol'; // caminho único compartilhado no Firestore
 const ALLOWED_EMAILS = ['thiagoacsampaio@gmail.com', 'casorio.et@gmail.com']; // lista de e-mails com acesso permitido
@@ -1889,6 +1891,7 @@ function delFixo(id){if(!confirm('Excluir lançamento fixo?'))return;db.fixos=db
 // ════════════════════════════════════════════════════════════════════
 let _pjMes=new Date().toISOString().slice(0,7);
 const RESERVA_KEYS=['inv_13','inv_ferias','inv_fgts'];
+const PJ_BASE_INV_LBL={nf:'NF bruta do mês',prolabore:'pró-labore bruto',liquido:'NF bruta − DAS − pró-labore'};
 
 function ensurePJDefaults(){
   if(!db.pj)db.pj={};
@@ -1914,11 +1917,23 @@ function ensurePJDefaults(){
   if(pp.dctf_dia===undefined)pp.dctf_dia=15;          // vencimento da guia DCTFWeb (mês seguinte)
   if(pp.dctf_modo===undefined)pp.dctf_modo='inss_irrf'; // guia única INSS+IRRF | 'inss' = IRRF em DARF separado
   if(pp.pl_outros_perc===undefined)pp.pl_outros_perc=0; // % extra sobre o bruto somado na guia (outros encargos)
+  if(pp.lucro_conta===undefined)pp.lucro_conta='';    // conta corrente que recebe a distribuição de lucros
   if(!pp.inv)pp.inv={p13:8.33,ferias:11.11,fgts:8,base:'nf',conta_destino:''}; // reservas sugeridas (% sobre NF bruta)
   // v3.7: origem da transferência das reservas e destino individual por reserva
   if(pp.inv.conta_origem===undefined)pp.inv.conta_origem='';
   if(!pp.inv.dest)pp.inv.dest={inv_13:pp.inv.conta_destino||'',inv_ferias:pp.inv.conta_destino||'',inv_fgts:pp.inv.conta_destino||''};
   RESERVA_KEYS.forEach(k=>{if(pp.inv.dest[k]===undefined)pp.inv.dest[k]=pp.inv.conta_destino||'';});
+  // Correção: a lista de destino já teve <option> sem value com sufixo " 📈",
+  // então nomes salvos podem ter vindo com o emoji grudado.
+  const limpaConta=n=>{
+    if(!n||db.contas.some(c=>c.nome===n))return n||'';
+    const alvo=String(n).replace(/\s*[📈⚠].*$/,'').trim();
+    return db.contas.some(c=>c.nome===alvo)?alvo:(n||'');
+  };
+  pp.inv.conta_destino=limpaConta(pp.inv.conta_destino);
+  pp.conta_pf=limpaConta(pp.conta_pf);
+  pp.lucro_conta=limpaConta(pp.lucro_conta);
+  RESERVA_KEYS.forEach(k=>{pp.inv.dest[k]=limpaConta(pp.inv.dest[k]);});
   if(!pp.irrf_faixas)pp.irrf_faixas=[                 // tabela mensal (ref. mai/2025)
     {ate:2428.80,aliq:0,deduz:0},
     {ate:2826.65,aliq:7.5,deduz:182.16},
@@ -2023,8 +2038,27 @@ function pjResumo(mk){
   // As reservas ficam de fora: o dinheiro muda de conta mas continua sendo patrimônio.
   const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&ym(l.data)===mk&&(l.tipo==='D'||l.tipo==='I'||(l.tipo==='Tr'&&l.transfer_out===true&&l.pj_tipo==='prolabore')));
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
-  // Reservas sugeridas (proteção estilo CLT) — % sobre a base escolhida (NF bruta ou pró-labore)
-  const baseInv=pp.inv.base==='prolabore'?folhaMes:receitaFiscal;
+  // Base 'liquido' das reservas: NF bruta − DAS − custo do pró-labore.
+  // Custo do pró-labore = líquido + guia DCTFWeb (+ DARF avulso). Como
+  // líquido + guia = bruto, o INSS/IRRF não entra duas vezes na conta.
+  const dasL=db.lancamentos.find(l=>l.pj_tipo==='das'&&l.pj_mes===mk);
+  const guiaL=db.lancamentos.find(l=>l.pj_tipo==='pl_dctfweb'&&l.pj_mes===mk);
+  const darfL=db.lancamentos.find(l=>l.pj_tipo==='pl_irrf'&&l.pj_mes===mk);
+  const dasDeduz=dasL?Number(dasL.valor||0):das;
+  const plProvisionado=!!plMesL;
+  const plDeduz=plProvisionado
+    ?Number(plMesL.valor||0)+(guiaL?Number(guiaL.valor||0):0)+(darfL?Number(darfL.valor||0):0)
+    :pjPLCalc(sugerido).custoPJ;
+  const invDeduz=[
+    {nome:'DAS',valor:dasDeduz,estimado:!dasL},
+    {nome:'Pró-labore + DCTFWeb',valor:plDeduz,estimado:!plProvisionado}
+  ];
+  const invDeduzTot=dasDeduz+plDeduz;
+  const invEstimado=invDeduz.some(x=>x.estimado);
+  // Reservas sugeridas (proteção estilo CLT) — % sobre a base escolhida
+  const baseInv=pp.inv.base==='prolabore'?folhaMes
+               :pp.inv.base==='liquido'?Math.max(0,receitaFiscal-invDeduzTot)
+               :receitaFiscal;
   const invOri=pjInvOrigem();
   const reservas=[
     {key:'inv_13',nome:'13º salário',det:'1/12 avos',pct:pp.inv.p13,valor:baseInv*pp.inv.p13/100},
@@ -2032,7 +2066,31 @@ function pjResumo(mk){
     {key:'inv_fgts',nome:'Reserva de segurança',det:'estilo FGTS',pct:pp.inv.fgts,valor:baseInv*pp.inv.fgts/100}
   ].map(x=>({...x,dest:pjInvDest(x.key),origem:invOri}));
   const reservasTot=reservas.reduce((s,x)=>s+x.valor,0);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,aliqManual,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,invOri,reservas,reservasTot};
+
+  // ── Distribuição de lucros: o que sobra depois de fechar a apuração do mês ──
+  // Tudo por COMPETÊNCIA de mk. As despesas operacionais excluem as provisões do
+  // próprio módulo (DAS, taxas, pró-labore, reservas): elas vencem no mês seguinte
+  // e entram aqui pela competência delas, não pela data de pagamento.
+  const ehProvisaoPJ=l=>!!l.pj_tipo&&(['das','prolabore','prolabore_pf','pl_dctfweb','pl_inss','pl_irrf','lucro'].includes(l.pj_tipo)||String(l.pj_tipo).startsWith('taxa:')||String(l.pj_tipo).startsWith('inv_'));
+  const despOperL=despesas.filter(l=>!ehProvisaoPJ(l));
+  const despOper=despOperL.reduce((s,l)=>s+Number(l.valor||0),0);
+  const taxasProv=db.lancamentos.filter(l=>String(l.pj_tipo||'').startsWith('taxa:')&&l.pj_mes===mk);
+  const taxasDeduz=taxasProv.length?taxasProv.reduce((s,l)=>s+Number(l.valor||0),0):taxasTot;
+  // Reservas: o valor já provisionado manda; senão, o sugerido
+  const reservasDeduz=reservas.reduce((s,x)=>{const l=pjReservaLanc(x.key,mk);return s+(l?Number(l.valor||0):x.valor);},0);
+  const lucroItens=[
+    {nome:'Receita do mês',valor:receitaMes,sinal:1,det:pp.regime==='caixa'?'somente recebido':'recebido + a receber'},
+    {nome:'DAS',valor:dasDeduz,sinal:-1,estimado:!dasL},
+    {nome:'Taxas extras',valor:taxasDeduz,sinal:-1,estimado:!taxasProv.length},
+    {nome:'Pró-labore + DCTFWeb',valor:plDeduz,sinal:-1,estimado:!plProvisionado},
+    {nome:'Despesas PJ do mês',valor:despOper,sinal:-1,det:`${despOperL.length} lançamento(s)`},
+    {nome:'Reservas',valor:reservasDeduz,sinal:-1,estimado:!reservas.some(x=>pjReservaLanc(x.key,mk))}
+  ].filter(x=>x.sinal>0||x.valor>0.005);
+  const lucro=lucroItens.reduce((s,x)=>s+x.sinal*x.valor,0);
+  const lucroEstimado=lucroItens.some(x=>x.estimado);
+  const lucroConta=contaExiste(pp.lucro_conta)?pp.lucro_conta:null;
+  const lucroL=pjLucroLanc(mk);
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,aliqManual,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,invOri,invDeduz,invDeduzTot,invEstimado,reservas,reservasTot,despOper,despOperL,lucroItens,lucro,lucroEstimado,lucroConta,lucroL};
 }
 
 // ── Reservas sugeridas: provisionar / efetivar / remover ──
@@ -2079,6 +2137,38 @@ function pjEfetivarReserva(key){
 function pjRemoverReserva(key){
   if(!confirm('Remover esta provisão de reserva?'))return;
   db.lancamentos=db.lancamentos.filter(l=>!(l.pj_tipo===key&&l.pj_mes===_pjMes));
+  save();pPJ();
+}
+
+// ── Distribuição de lucros: provisionar / efetivar / remover ──
+function pjLucroLanc(mk){return db.lancamentos.find(l=>l.pj_tipo==='lucro'&&l.pj_mes===mk&&(l.tipo!=='Tr'||l.transfer_out===true));}
+function pjProvisionarLucro(){
+  const mk=_pjMes;ensurePJDefaults();
+  const r=pjResumo(mk);
+  const valor=Math.round(r.lucro*100)/100;
+  if(valor<=0){alert('Não há lucro a distribuir neste mês — a apuração fechou em zero ou negativo.');return;}
+  const ori=r.invOri;
+  if(!ori){alert('Defina a conta PJ de origem em Parâmetros.');return;}
+  if(!r.lucroConta){alert('Defina em Parâmetros a conta corrente que recebe a distribuição de lucros.');return;}
+  if(r.lucroConta===ori){alert('A conta de destino é a mesma de origem. Escolha outra em Parâmetros.');return;}
+  const fimMes=mk+'-'+String(monthEnd(mk)).padStart(2,'0');
+  db.lancamentos=db.lancamentos.filter(l=>!(l.pj_tipo==='lucro'&&l.pj_mes===mk));
+  const gid='lucro-'+mk+'-'+nid(db.lancamentos);
+  const base={valor,obs:`Distribuição de lucros ref. ${mk} · Controle PJ`,importado:false,pago:false,origem:'pj',pj_tipo:'lucro',pj_mes:mk,transfer_grupo:gid};
+  db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Distribuição de lucros ${mesLabel(mk)} → ${r.lucroConta}`,tipo:'Tr',conta:ori,transfer_out:true,transfer_partner:r.lucroConta,...base});
+  db.lancamentos.push({id:nid(db.lancamentos),data:fimMes,desc:`Distribuição de lucros ${mesLabel(mk)} ← ${ori}`,tipo:'Tr',conta:r.lucroConta,transfer_out:false,transfer_partner:ori,...base});
+  save();pPJ();
+}
+function pjEfetivarLucro(){
+  const ls=db.lancamentos.filter(l=>l.pj_tipo==='lucro'&&l.pj_mes===_pjMes);
+  if(!ls.length)return;
+  const novo=ls[0].pago===false;
+  ls.forEach(l=>{l.pago=novo});
+  save();pPJ();
+}
+function pjRemoverLucro(){
+  if(!confirm('Remover a provisão de distribuição de lucros deste mês?'))return;
+  db.lancamentos=db.lancamentos.filter(l=>!(l.pj_tipo==='lucro'&&l.pj_mes===_pjMes));
   save();pPJ();
 }
 
@@ -2188,7 +2278,11 @@ function pPJ(){
   </div>`:''}
 
   ${r.baseInv>0||r.reservas.some(x=>pjReservaLanc(x.key,mk))?`<div class="card" style="margin-bottom:16px">
-    <div class="card-head"><h3>💰 Reservas Sugeridas — proteção estilo CLT</h3><div style="display:flex;align-items:center;gap:10px"><span class="txt-xs" style="color:var(--ink3)">base: ${r.pp.inv.base==='prolabore'?'pró-labore bruto':'NF bruta do mês'} (${R(r.baseInv)}) · origem: ${r.invOri?esc(r.invOri):'<span style="color:var(--red)">não definida</span>'}</span>${r.reservas.some(x=>!pjReservaLanc(x.key,mk)&&x.valor>0)?`<button class="btn btn-xs btn-dark" onclick="pjProvisionarReservasTodas()">Provisionar todas</button>`:''}<button class="btn btn-xs btn-ghost" onclick="openPJParams()">⚙ Contas</button></div></div>
+    <div class="card-head"><h3>💰 Reservas Sugeridas — proteção estilo CLT</h3><div style="display:flex;align-items:center;gap:10px"><span class="txt-xs" style="color:var(--ink3)">base: ${esc(PJ_BASE_INV_LBL[r.pp.inv.base]||PJ_BASE_INV_LBL.nf)} (${R(r.baseInv)}) · origem: ${r.invOri?esc(r.invOri):'<span style="color:var(--red)">não definida</span>'}</span>${r.reservas.some(x=>!pjReservaLanc(x.key,mk)&&x.valor>0)?`<button class="btn btn-xs btn-dark" onclick="pjProvisionarReservasTodas()">Provisionar todas</button>`:''}<button class="btn btn-xs btn-ghost" onclick="openPJParams()">⚙ Contas</button></div></div>
+    ${r.pp.inv.base==='liquido'?`<div class="tip ${r.invEstimado?'tip-amber':'tip-blue'}" style="margin:0 14px 12px">
+      🧮 Base = NF bruta ${R(r.receitaFiscal)} ${r.invDeduz.map(d=>`− ${esc(d.nome)} ${R(d.valor)}${d.estimado?' <em>(estimado)</em>':''}`).join(' ')} = <strong>${R(r.baseInv)}</strong>
+      ${r.invEstimado?`<br><span class="txt-xs">Os itens marcados como estimados ainda não foram provisionados neste mês — o valor da base muda quando você provisionar.</span>`:''}
+    </div>`:''}
     ${r.reservas.some(x=>!x.dest)?`<div class="tip tip-amber" style="margin:0 14px 12px">⚠ Sem conta de destino definida para ${r.reservas.filter(x=>!x.dest).map(x=>`<strong>${x.nome}</strong>`).join(', ')} — a provisão vira um lançamento de Investimento na própria conta PJ, sem transferência. Defina o destino em <a href="#" onclick="openPJParams();return false" style="color:inherit;font-weight:700">Parâmetros</a>.</div>`:''}
     <div class="tbl-wrap"><table><thead><tr><th>Reserva</th><th>Regra</th><th>%</th><th>Valor</th><th>Transferência</th><th>Status</th><th></th></tr></thead><tbody>
       ${r.reservas.map(x=>{
@@ -2217,6 +2311,31 @@ function pPJ(){
       <tr><td colspan="3" style="background:var(--line2);font-weight:700">Total sugerido no mês</td><td class="v-neu fw7" style="background:var(--line2)">${R(r.reservasTot)}</td><td colspan="3" style="background:var(--line2)" class="txt-xs">provisione e marque ✓ Efetivar quando a transferência cair de verdade</td></tr>
     </tbody></table></div>
   </div>`:''}
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-head"><h3>🏆 Distribuição de Lucros — ${mesLabel(mk)}</h3><div style="display:flex;align-items:center;gap:10px">
+      <span class="txt-xs" style="color:var(--ink3)">${r.invOri?esc(r.invOri):'origem não definida'} → ${r.lucroConta?esc(r.lucroConta):'<span style="color:var(--red)">conta não definida</span>'}</span>
+      <button class="btn btn-xs btn-ghost" onclick="openPJParams()">⚙ Conta</button></div></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Composição</th><th></th><th>Valor</th></tr></thead><tbody>
+      ${r.lucroItens.map(x=>`<tr>
+        <td>${x.sinal>0?'':'<span style="color:var(--ink3)">−</span> '}${esc(x.nome)}${x.estimado?' <span class="tag tag-a" style="font-size:9px">estimado</span>':''}</td>
+        <td class="txt-xs" style="color:var(--ink3)">${esc(x.det||'')}</td>
+        <td class="${x.sinal>0?'v-pos':'v-neg'}">${x.sinal>0?'+':'−'}${R(x.valor)}</td>
+      </tr>`).join('')}
+      <tr><td colspan="2" style="background:var(--line2);font-weight:700">Lucro distribuível</td><td class="${r.lucro>=0?'v-pos':'v-neg'} fw7" style="background:var(--line2);font-size:15px">${R(r.lucro)}</td></tr>
+    </tbody></table></div>
+    <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <span class="txt-xs" style="color:var(--ink3)">${r.lucroEstimado?'⚠ Há itens ainda não provisionados no mês — o valor muda conforme você provisiona DAS, pró-labore e reservas.':'Todos os itens da apuração já estão provisionados.'}</span>
+      <div style="display:flex;gap:6px">
+        ${!r.lucroL
+          ?(r.lucro>0?`<button class="btn btn-sm btn-dark" onclick="pjProvisionarLucro()">Provisionar ${R(r.lucro)}</button>`:'<span class="txt-xs" style="color:var(--ink3)">sem lucro a distribuir</span>')
+          :`${Math.abs(Number(r.lucroL.valor)-Math.round(r.lucro*100)/100)>0.005?`<button class="btn btn-sm btn-ghost" title="Recalcular pelo valor atual" onclick="pjProvisionarLucro()">↺ ${R(r.lucro)}</button>`:''}
+             <button class="btn btn-sm ${r.lucroL.pago!==false?'btn-ghost':'btn-green'}" onclick="pjEfetivarLucro()">${r.lucroL.pago!==false?'↩ Reabrir':'✓ Efetivar'}</button>
+             <button class="ico-btn" onclick="pjRemoverLucro()">🗑</button>`}
+      </div>
+    </div>
+    ${r.lucroL?`<div class="card-body" style="border-top:1px solid var(--line)"><span class="txt-xs">Provisionado <strong>${R(r.lucroL.valor)}</strong> em ${fdt(r.lucroL.data)} · <span class="mono">${esc(r.lucroL.conta)} → ${esc(r.lucroL.transfer_partner||'')}</span> · ${r.lucroL.pago!==false?'<span class="tag tag-g">✓ Transferido</span>':'<span class="tag tag-a">Pendente</span>'}</span></div>`:''}
+  </div>
 
   <div class="two">
     <div class="card">
@@ -2443,8 +2562,19 @@ function openPJParams(){
   const pp=db.pj.params;
   const tbl=(pref,rows)=>`<div class="tbl-wrap"><table style="font-size:12px"><thead><tr><th>Até (R$) — vazio = sem limite</th><th>Alíquota %</th><th>Dedução (R$)</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><input id="${pref}-${i}-ate" type="number" step="0.01" value="${r.ate||''}" placeholder="∞" style="width:130px"></td><td><input id="${pref}-${i}-aliq" type="number" step="0.01" value="${r.aliq}" style="width:80px"></td><td><input id="${pref}-${i}-ded" type="number" step="0.01" value="${r.deduz}" style="width:110px"></td></tr>`).join('')}</tbody></table></div>`;
   const contasChk=db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<label style="display:inline-flex;align-items:center;gap:5px;font-weight:400;margin-right:12px"><input type="checkbox" id="pj-cta-${c.id}" style="width:auto" ${db.pj.contas.includes(c.nome)?'checked':''}> ${esc(c.nome)}${c.subtipo==='PJ'?' <span class="tag tag-a" style="font-size:9px">PJ</span>':''}</label>`).join('');
-  const contaPFOpts=['<option value="">— Não gerar transferência p/ a PF —</option>',...db.contas.filter(c=>c.ativo&&!db.pj.contas.includes(c.nome)).sort(cmpName).map(c=>`<option ${pp.conta_pf===c.nome?'selected':''}>${esc(c.nome)}</option>`)].join('');
-  const destOpts=(vazio,sel)=>[`<option value="">${vazio}</option>`,...db.contas.filter(c=>c.ativo).sort(cmpName).map(c=>`<option ${sel===c.nome?'selected':''}>${esc(c.nome)}${c.tipo==='Investimento'?' 📈':''}</option>`)].join('');
+  // O pró-labore cai numa conta corrente da PF; as reservas vão para contas de
+  // investimento. Uma conta já configurada fora do tipo continua na lista, marcada,
+  // para não sumir silenciosamente da configuração.
+  // value explícito: sem ele a option assume o texto como valor e o sufixo
+  // (⚠/📈) entraria no nome da conta salva.
+  const opts=(vazio,sel,filtro)=>{
+    const lista=db.contas.filter(c=>c.ativo&&(filtro(c)||sel===c.nome)).sort(cmpName);
+    return [`<option value="">${vazio}</option>`,...lista.map(c=>`<option value="${esc(c.nome)}" ${sel===c.nome?'selected':''}>${esc(c.nome)}${filtro(c)?'':' ⚠ '+esc(c.tipo)}</option>`)].join('');
+  };
+  const ehCorrentePF=c=>c.tipo==='Corrente'&&!db.pj.contas.includes(c.nome);
+  const ehInvestimento=c=>c.tipo==='Investimento';
+  const contaPFOpts=opts('— Não gerar transferência p/ a PF —',pp.conta_pf,ehCorrentePF);
+  const destOpts=(vazio,sel)=>opts(vazio,sel,ehInvestimento);
   showM('Parâmetros do Controle PJ','modal-xl',`
     <div class="fgrid">
       <div class="fg full"><div class="tip tip-amber">⚠ Os valores abaixo são referência e mudam por lei — <strong>confira com seu contador</strong> e atualize aqui quando houver reajuste (salário mínimo, teto INSS, tabela IRRF, anexos do Simples).</div></div>
@@ -2452,6 +2582,7 @@ function openPJParams(){
       <div class="fg"><label>Base de cálculo dos impostos</label><select id="pj-base"><option value="auto" ${pp.base==='auto'||!pp.base?'selected':''}>Automática (NF quando houver notas)</option><option value="nf" ${pp.base==='nf'?'selected':''}>Notas Fiscais emitidas</option><option value="receb" ${pp.base==='receb'?'selected':''}>Recebimentos (lançamentos)</option></select><div class="field-hint">Com NF: o mês da emissão define DAS, Fator R e pró-labore</div></div>
       <div class="fg"><label>Regime da receita (sem NF)</label><select id="pj-regime"><option value="competencia" ${pp.regime!=='caixa'?'selected':''}>Competência (recebidos + a receber)</option><option value="caixa" ${pp.regime==='caixa'?'selected':''}>Caixa (somente recebidos)</option></select></div>
       <div class="fg"><label>Conta PF que recebe o pró-labore líquido</label><select id="pj-conta-pf">${contaPFOpts}</select><div class="field-hint">gera uma transferência conta PJ → esta conta com o valor líquido</div></div>
+      <div class="fg"><label>Conta que recebe a distribuição de lucros</label><select id="pj-lucro-conta">${opts('— Não gerar transferência de lucros —',pp.lucro_conta,ehCorrentePF)}</select><div class="field-hint">o que sobra após DAS, pró-labore, despesas PJ e reservas</div></div>
       <div class="fg-lbl">Simples Nacional / Fator R</div>
       <div class="fg"><label>Fator R alvo (%)</label><input type="number" id="pj-fr" step="0.1" value="${pp.fator_r_alvo}"><div class="field-hint">≥ este % → Anexo III; abaixo → Anexo V</div></div>
       <div class="fg"><label>Janela da folha no Fator R</label><select id="pj-frbase"><option value="anterior" ${pp.fr_base!=='corrente'?'selected':''}>12 meses anteriores (regra CGSN)</option><option value="corrente" ${pp.fr_base==='corrente'?'selected':''}>Mês corrente + 11 anteriores</option></select><div class="field-hint">Na regra oficial, o pró-labore do mês só conta a partir do mês seguinte</div></div>
@@ -2474,7 +2605,7 @@ function openPJParams(){
       <div class="fg"><label>13º salário (% da base)</label><input type="number" id="pj-inv-13" step="0.01" value="${pp.inv.p13}"><div class="field-hint">1/12 avos ≈ 8,33%</div></div>
       <div class="fg"><label>Férias (% da base)</label><input type="number" id="pj-inv-fer" step="0.01" value="${pp.inv.ferias}"><div class="field-hint">1/12 + 1/3 ≈ 11,11%</div></div>
       <div class="fg"><label>Longo prazo / segurança (%)</label><input type="number" id="pj-inv-fgts" step="0.01" value="${pp.inv.fgts}"><div class="field-hint">estilo FGTS: 8%</div></div>
-      <div class="fg"><label>Base das reservas</label><select id="pj-inv-base"><option value="nf" ${pp.inv.base!=='prolabore'?'selected':''}>NF bruta do mês</option><option value="prolabore" ${pp.inv.base==='prolabore'?'selected':''}>Pró-labore bruto do mês</option></select></div>
+      <div class="fg"><label>Base das reservas</label><select id="pj-inv-base"><option value="nf" ${!pp.inv.base||pp.inv.base==='nf'?'selected':''}>NF bruta do mês</option><option value="prolabore" ${pp.inv.base==='prolabore'?'selected':''}>Pró-labore bruto do mês</option><option value="liquido" ${pp.inv.base==='liquido'?'selected':''}>NF bruta − impostos (DAS + pró-labore/DCTFWeb)</option></select><div class="field-hint">A opção com impostos usa os valores já provisionados no mês; enquanto não houver provisão, usa a estimativa</div></div>
       <div class="fg"><label>Conta PJ de origem das reservas</label><select id="pj-inv-origem">${['<option value="">— Primeira conta PJ da lista —</option>',...pjContas().map(n=>`<option ${pp.inv.conta_origem===n?'selected':''}>${esc(n)}</option>`)].join('')}</select><div class="field-hint">de onde o dinheiro sai (ex.: Cora)</div></div>
       <div class="fg"><label>Destino padrão</label><select id="pj-inv-conta">${destOpts('— Sem destino: lança como Investimento na própria conta PJ —',pp.inv.conta_destino)}</select><div class="field-hint">usado nas reservas sem destino próprio abaixo</div></div>
       <div class="fg"><label>Destino — 13º salário</label><select id="pj-inv-dest-inv_13">${destOpts('— Usar o destino padrão —',pp.inv.dest.inv_13)}</select></div>
@@ -2493,6 +2624,7 @@ function savePJParams(){
   pp.base=fv('pj-base')||'auto';
   pp.regime=fv('pj-regime')||'competencia';
   pp.conta_pf=fv('pj-conta-pf')||'';
+  pp.lucro_conta=fv('pj-lucro-conta')||'';
   pp.fator_r_alvo=parseFloat(fv('pj-fr'))||28;
   pp.fr_base=fv('pj-frbase')||'anterior';
   pp.inicio=fv('pj-inicio')||'';
