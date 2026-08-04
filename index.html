@@ -2034,10 +2034,17 @@ function pjResumo(mk){
   const taxasTot=taxas.reduce((s,t)=>s+t.valor,0);
   const baseMensal=emInicio?(mesesHist>0?rbt/mesesHist:receitaFiscal):(rbt>0?rbt/12:receitaFiscal);
   const sugerido=Math.max(pp.salario_minimo,baseMensal*pp.fator_r_alvo/100);
-  // Despesa PJ = D/I das contas PJ + a perna de SAÍDA do pró-labore (transferência p/ a PF).
-  // As reservas ficam de fora: o dinheiro muda de conta mas continua sendo patrimônio.
-  const despesas=db.lancamentos.filter(l=>contas.includes(l.conta)&&ym(l.data)===mk&&(l.tipo==='D'||l.tipo==='I'||(l.tipo==='Tr'&&l.transfer_out===true&&l.pj_tipo==='prolabore')));
+  // Movimentos das contas PJ no mês, separados por natureza:
+  //  · despesas  = D/I (custo de verdade, entra no Resultado do Mês)
+  //  · transfs   = Tr (pró-labore, reservas, lucro, aportes) — o dinheiro muda
+  //    de conta mas não é despesa, então fica num subtotal próprio.
+  const movs=db.lancamentos.filter(l=>contas.includes(l.conta)&&ym(l.data)===mk);
+  const despesas=movs.filter(l=>l.tipo==='D'||l.tipo==='I');
   const despTot=despesas.reduce((s,l)=>s+Number(l.valor||0),0);
+  const transfs=movs.filter(l=>l.tipo==='Tr');
+  const transfSaida=transfs.filter(l=>l.transfer_out===true).reduce((s,l)=>s+Number(l.valor||0),0);
+  const transfEntrada=transfs.filter(l=>l.transfer_out===false).reduce((s,l)=>s+Number(l.valor||0),0);
+  const transfLiq=transfSaida-transfEntrada;
   // Base 'liquido' das reservas: NF bruta − DAS − custo do pró-labore.
   // Custo do pró-labore = líquido + guia DCTFWeb (+ DARF avulso). Como
   // líquido + guia = bruto, o INSS/IRRF não entra duas vezes na conta.
@@ -2090,7 +2097,7 @@ function pjResumo(mk){
   const lucroEstimado=lucroItens.some(x=>x.estimado);
   const lucroConta=contaExiste(pp.lucro_conta)?pp.lucro_conta:null;
   const lucroL=pjLucroLanc(mk);
-  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,aliqManual,das,taxas,taxasTot,sugerido,plMesL,despesas,despTot,baseInv,invOri,invDeduz,invDeduzTot,invEstimado,reservas,reservasTot,despOper,despOperL,lucroItens,lucro,lucroEstimado,lucroConta,lucroL};
+  return {pp,contas,recs,recebido,aReceber,receitaMes,usaNF,notasMes,nfTot,receitaFiscal,rbt,rbtBase,inicio,mesesHist,emInicio,folha,fr,frProj,proxMk,anexo,aliq,aliqManual,das,taxas,taxasTot,sugerido,plMesL,movs,despesas,despTot,transfs,transfSaida,transfEntrada,transfLiq,baseInv,invOri,invDeduz,invDeduzTot,invEstimado,reservas,reservasTot,despOper,despOperL,lucroItens,lucro,lucroEstimado,lucroConta,lucroL};
 }
 
 // ── Reservas sugeridas: provisionar / efetivar / remover ──
@@ -2209,8 +2216,20 @@ function pPJ(){
     <td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Pago':'Pendente'}</button></td>
     <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>
   </tr>`;
+  // Transferências: mostram para onde/de onde o dinheiro foi, com o sinal do movimento
+  const rowT=l=>{
+    const sai=l.transfer_out===true;
+    return `<tr>
+    <td class="mono txt-xs">${fdt(l.data)}</td>
+    <td>${esc(l.desc)} ${origemTag(l)}${l.transfer_partner?`<br><span class="txt-xs" style="color:var(--ink3)">${sai?'→':'←'} ${esc(l.transfer_partner)}</span>`:''}</td>
+    <td>${esc(l.conta)}</td>
+    <td class="${sai?'v-neg':'v-pos'}">${sai?'-':'+'}${R(l.valor)}</td>
+    <td><button class="btn btn-xs ${l.pago!==false?'btn-green':'btn-ghost'}" onclick="togglePagoLanc(${l.id})">${l.pago!==false?'✓ Efetivada':'Pendente'}</button></td>
+    <td><div style="display:flex;gap:3px"><button class="ico-btn" onclick="openLancModal(${l.id})">✏️</button><button class="ico-btn" onclick="delLanc(${l.id})">🗑</button></div></td>
+  </tr>`;};
   const recsSort=[...r.recs].sort((a,b)=>a.data<b.data?-1:1);
   const despSort=[...r.despesas].sort((a,b)=>a.data<b.data?-1:1);
+  const transfSort=[...r.transfs].sort((a,b)=>a.data<b.data?-1:(a.data>b.data?1:(a.transfer_out===b.transfer_out?0:a.transfer_out?-1:1)));
 
   set(`
   <div class="sticky-bar">
@@ -2234,8 +2253,8 @@ function pPJ(){
     <div class="kpi c-p"><div class="kpi-lbl">${r.usaNF?'NF Emitidas no Mês':'Receita Fiscal do Mês'}</div><div class="kpi-val">${R(r.receitaFiscal)}</div><div class="kpi-sub">${r.usaNF?`${r.notasMes.length} nota(s) — base dos impostos`:'base dos impostos ('+(r.pp.regime==='caixa'?'caixa':'competência')+')'}</div></div>
     <div class="kpi c-g"><div class="kpi-lbl">Recebido no Mês</div><div class="kpi-val">${R(r.recebido)}</div></div>
     <div class="kpi c-b"><div class="kpi-lbl">A Receber no Mês</div><div class="kpi-val">${R(r.aReceber)}</div></div>
-    <div class="kpi c-r"><div class="kpi-lbl">Despesas PJ no Mês</div><div class="kpi-val">${R(r.despTot)}</div></div>
-    <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">caixa: recebido + a receber − despesas</div></div>
+    <div class="kpi c-r"><div class="kpi-lbl">Despesas PJ no Mês</div><div class="kpi-val">${R(r.despTot)}</div><div class="kpi-sub">${r.transfs.length?`+ ${R(r.transfLiq)} em transferências`:'sem transferências no mês'}</div></div>
+    <div class="kpi ${r.receitaMes-r.despTot>=0?'c-g':'c-r'}"><div class="kpi-lbl">Resultado do Mês</div><div class="kpi-val">${R(r.receitaMes-r.despTot)}</div><div class="kpi-sub">recebido + a receber − despesas</div></div>
   </div>
   <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
     <div class="kpi c-t"><div class="kpi-lbl">${r.emInicio?'RBT12 Proporcional':'RBT12'}</div><div class="kpi-val">${R(r.rbtBase)}</div><div class="kpi-sub">${r.emInicio?`início de atividade (${mesLabel(r.inicio)}) — ${r.mesesHist>0?`média de ${r.mesesHist} mês(es) × 12`:'receita do mês × 12'}`:'receita bruta 12 meses anteriores'}</div></div>
@@ -2346,10 +2365,14 @@ function pPJ(){
       </tbody></table></div>
     </div>
     <div class="card">
-      <div class="card-head"><h3>Despesas PJ — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">${r.despesas.length} item(ns) · total <strong class="v-neg">${R(r.despTot)}</strong></span></div>
+      <div class="card-head"><h3>Despesas e Transferências PJ — ${mesLabel(mk)}</h3><span class="txt-xs" style="color:var(--ink3)">despesas <strong class="v-neg">${R(r.despTot)}</strong>${r.transfs.length?` · transferências <strong class="v-neg">${R(r.transfLiq)}</strong>`:''}</span></div>
       <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
         ${despSort.length?despSort.map(rowD).join(''):'<tr><td colspan="6"><div class="empty" style="padding:24px"><big>🏢</big>Nenhuma despesa neste mês<br><span class="txt-xs">Dica: cadastre despesas recorrentes (escritório, contador...) em Lançamentos Fixos usando a conta PJ</span></div></td></tr>'}
         ${despSort.length?`<tr><td colspan="3" style="background:var(--line2);font-weight:700">Total de Despesas</td><td class="v-neg fw7" style="background:var(--line2)">-${R(r.despTot)}</td><td colspan="2" style="background:var(--line2)" class="txt-xs">pago ${R(r.despesas.filter(l=>l.pago!==false).reduce((s,l)=>s+Number(l.valor||0),0))} · pendente ${R(r.despesas.filter(l=>l.pago===false).reduce((s,l)=>s+Number(l.valor||0),0))}</td></tr>`:''}
+        ${transfSort.length?`
+        <tr><td colspan="6" style="background:var(--line2);font-weight:700;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2)">↔ Transferências — pró-labore, reservas e lucro <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink3)">(não entram no Resultado do Mês: o dinheiro muda de conta, não vira custo)</span></td></tr>
+        ${transfSort.map(rowT).join('')}
+        <tr><td colspan="3" style="background:var(--line2);font-weight:700">Saldo das Transferências</td><td class="${r.transfLiq>=0?'v-neg':'v-pos'} fw7" style="background:var(--line2)">${r.transfLiq>=0?'-':'+'}${R(Math.abs(r.transfLiq))}</td><td colspan="2" style="background:var(--line2)" class="txt-xs">saíram ${R(r.transfSaida)}${r.transfEntrada?` · entraram ${R(r.transfEntrada)}`:''}</td></tr>`:''}
       </tbody></table></div>
     </div>
   </div>
@@ -2361,11 +2384,20 @@ function pPJ(){
         <span>Receitas <strong class="v-pos" style="font-size:16px">${R(r.recebido+r.aReceber)}</strong></span>
         <span style="color:var(--ink3)">−</span>
         <span>Despesas <strong class="v-neg" style="font-size:16px">${R(r.despTot)}</strong></span>
+        ${r.transfs.length?`<span style="color:var(--ink3)">−</span><span>Transferências <strong class="v-neg" style="font-size:16px">${R(r.transfLiq)}</strong></span>`:''}
         <span style="color:var(--ink3)">=</span>
       </div>
-      <div style="text-align:right">
-        <div class="kpi-lbl">Líquido de ${mesLabel(mk)}</div>
-        <div class="kpi-val" style="font-size:26px;color:${(r.recebido+r.aReceber-r.despTot)>=0?'var(--green)':'var(--red)'}">${R(r.recebido+r.aReceber-r.despTot)}</div>
+      <div style="display:flex;gap:28px;text-align:right">
+        <div>
+          <div class="kpi-lbl">Resultado de ${mesLabel(mk)}</div>
+          <div class="kpi-val" style="font-size:22px;color:${(r.recebido+r.aReceber-r.despTot)>=0?'var(--green)':'var(--red)'}">${R(r.recebido+r.aReceber-r.despTot)}</div>
+          <div class="txt-xs" style="color:var(--ink3)">sem transferências</div>
+        </div>
+        ${r.transfs.length?`<div>
+          <div class="kpi-lbl">Sobra em caixa</div>
+          <div class="kpi-val" style="font-size:26px;color:${(r.recebido+r.aReceber-r.despTot-r.transfLiq)>=0?'var(--green)':'var(--red)'}">${R(r.recebido+r.aReceber-r.despTot-r.transfLiq)}</div>
+          <div class="txt-xs" style="color:var(--ink3)">depois das transferências</div>
+        </div>`:''}
       </div>
     </div>
   </div>
